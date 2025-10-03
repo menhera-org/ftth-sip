@@ -82,6 +82,7 @@ impl std::fmt::Debug for PendingInvite {
             .field("media_key", &self.media_key)
             .field("upstream_target", &self.upstream_target)
             .field("downstream_contact", &self.downstream_contact)
+            .field("downstream_target", &self.downstream_target)
             .finish()
     }
 }
@@ -563,7 +564,12 @@ impl RsipstackBackend {
             .retain(|header| !matches!(header, rsip::Header::Via(_)));
 
         if let Some(contact) = &call.downstream_contact {
-            request.uri = contact.clone();
+            request
+                .headers
+                .unique_push(rsip::Header::Contact(Contact::from(format!(
+                    "<{}>",
+                    contact
+                ))));
         }
 
         let mut via_addr: SipAddr = downstream_listener.into();
@@ -1180,6 +1186,28 @@ impl RsipstackBackend {
                 Ok(())
             }
             TransactionDirection::Upstream => {
+                let mut call = call;
+
+                if let Some(contact) = tx
+                    .original
+                    .contact_header()
+                    .ok()
+                    .and_then(|header| header.typed().ok().map(|typed| typed.uri))
+                {
+                    call.upstream_contact = Some(contact);
+                }
+
+                let mut body_override: Option<Vec<u8>> = None;
+                if !tx.original.body.is_empty() {
+                    let body = String::from_utf8(tx.original.body.clone())
+                        .map_err(|err| Error::Media(err.to_string()))?;
+                    let rewrite = call.media.rewrite_for_downstream(&body)?;
+                    call.media
+                        .set_upstream_endpoints(rewrite.remote_rtp, Some(rewrite.remote_rtcp))
+                        .await;
+                    body_override = Some(rewrite.sdp.into_bytes());
+                }
+
                 let endpoint = {
                     let guard = self.inner.endpoint.read().await;
                     guard
@@ -1200,7 +1228,7 @@ impl RsipstackBackend {
                     downstream_listener,
                     &call,
                     &tx.original,
-                    None,
+                    body_override,
                 )?;
 
                 let mut client_tx = self
@@ -1212,18 +1240,53 @@ impl RsipstackBackend {
                     .await?;
 
                 let mut responded = false;
+                let mut new_downstream_contact = call.downstream_contact.clone();
                 while let Some(message) = client_tx.receive().await {
                     match message {
-                        SipMessage::Response(response) => {
+                        SipMessage::Response(mut response) => {
                             let status = response.status_code.clone();
-                            tx.respond(response).await.map_err(Error::sip_stack)?;
+
+                            if !response.body.is_empty() {
+                                if let Ok(body) = String::from_utf8(response.body.clone()) {
+                                    let rewrite = call.media.rewrite_for_upstream(&body)?;
+                                    call.media
+                                        .set_downstream_endpoints(
+                                            rewrite.remote_rtp,
+                                            Some(rewrite.remote_rtcp),
+                                        )
+                                        .await;
+                                    response.body = rewrite.sdp.into_bytes();
+                                    let len = response.body.len() as u32;
+                                    response.headers.unique_push(rsip::Header::ContentLength(
+                                        rsip::headers::ContentLength::from(len),
+                                    ));
+                                }
+                            }
+
+                            if let Some(contact) = response
+                                .contact_header()
+                                .ok()
+                                .and_then(|header| header.typed().ok().map(|typed| typed.uri))
+                            {
+                                new_downstream_contact = Some(contact);
+                            }
+
+                            tx.respond(response.clone())
+                                .await
+                                .map_err(Error::sip_stack)?;
                             responded = true;
                             if matches!(status.kind(), StatusCodeKind::Provisional) {
                                 continue;
                             }
+
                             if matches!(status.kind(), StatusCodeKind::Successful) {
-                                context.media.release(&call.media_key).await;
-                                context.calls.write().await.remove(&call_id);
+                                if let Some(contact) = &new_downstream_contact {
+                                    call.downstream_contact = Some(contact.clone());
+                                    if let Ok(target) = Self::sip_addr_from_uri(contact) {
+                                        call.downstream_target = target;
+                                    }
+                                }
+                                context.calls.write().await.insert(call_id.clone(), call);
                             }
                             break;
                         }
