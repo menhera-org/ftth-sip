@@ -29,6 +29,10 @@ pub struct UpstreamConfig {
     pub trunk_addr: IpAddr,
     /// UDP port used when connecting to the upstream trunk.
     pub trunk_port: u16,
+    /// Default caller identity to use when downstream does not present an allowed one.
+    pub default_identity: String,
+    /// Valid calling line identities (user parts) that may be presented towards NGN.
+    pub allowed_identities: Vec<String>,
     pub auth: Option<UpstreamAuth>,
     pub transport: TransportProfile,
 }

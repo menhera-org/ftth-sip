@@ -46,6 +46,14 @@ struct Cli {
     #[arg(long, default_value_t = 5060)]
     upstream_trunk_port: u16,
 
+    /// Default caller identity when downstream identity is not permitted
+    #[arg(long)]
+    upstream_default_identity: String,
+
+    /// Allowed calling identities (user part) permitted toward the NGN trunk.
+    #[arg(long = "allowed-identity", value_name = "NUMBER", action = clap::ArgAction::Append)]
+    upstream_allowed_identity: Vec<String>,
+
     /// Username for authenticating against upstream registrar
     #[arg(long)]
     upstream_auth_username: Option<String>,
@@ -156,6 +164,17 @@ impl Cli {
             }
         };
 
+        let mut allowed_identities = self.upstream_allowed_identity.clone();
+        if allowed_identities.is_empty() {
+            allowed_identities.push(self.upstream_default_identity.clone());
+        }
+        if !allowed_identities
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(&self.upstream_default_identity))
+        {
+            allowed_identities.push(self.upstream_default_identity.clone());
+        }
+
         let media_upstream = BindConfig {
             address: self.media_upstream_addr.unwrap_or(upstream_bind.address),
             port: self.media_upstream_port,
@@ -188,7 +207,7 @@ impl Cli {
         let downstream = DownstreamConfig {
             bind: downstream_bind,
             user_agent: AllowedUserAgent {
-                username: self.downstream_username,
+                username: self.downstream_username.clone(),
                 realm: self.downstream_realm,
             },
             transport: TransportProfile::Udp,
@@ -200,6 +219,8 @@ impl Cli {
             sip_domain: self.upstream_domain,
             trunk_addr: self.upstream_trunk_ip,
             trunk_port: self.upstream_trunk_port,
+            default_identity: self.upstream_default_identity,
+            allowed_identities,
             auth: upstream_auth,
             transport: TransportProfile::Udp,
         };

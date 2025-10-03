@@ -37,6 +37,8 @@ mod tests {
                 sip_domain: "example.ngn.jp".into(),
                 trunk_addr: "192.0.2.100".parse().unwrap(),
                 trunk_port: 5060,
+                default_identity: "0298284147".into(),
+                allowed_identities: vec!["0298284147".into()],
                 auth: Some(UpstreamAuth {
                     username: "upstream".into(),
                     password: "secret".into(),
