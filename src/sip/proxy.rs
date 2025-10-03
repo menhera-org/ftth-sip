@@ -28,6 +28,7 @@ use ftth_rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use ftth_rsipstack::transaction::transaction::Transaction;
 use rsip::headers::{Contact, ToTypedHeader, UntypedHeader};
 use rsip::message::headers_ext::HeadersExt;
+use rsip::typed;
 use rsip::{
     self, Method, Param, Response, SipMessage, StatusCode, StatusCodeKind, Uri,
     host_with_port::HostWithPort, transport::Transport,
@@ -69,6 +70,8 @@ struct PendingInvite {
     upstream_target: SipAddr,
     downstream_contact: Option<Uri>,
     cancel_token: CancellationToken,
+    endpoint: Arc<Endpoint>,
+    upstream_request: rsip::Request,
 }
 
 impl std::fmt::Debug for PendingInvite {
@@ -902,6 +905,7 @@ impl RsipstackBackend {
         )?;
 
         let target = Self::build_trunk_target(&config.upstream);
+        let upstream_request_clone = upstream_request.clone();
         let client_tx = self
             .start_client_transaction(endpoint.clone(), upstream_request, target.clone())
             .await?;
@@ -924,6 +928,8 @@ impl RsipstackBackend {
                 upstream_target: target,
                 downstream_contact: downstream_contact_uri,
                 cancel_token,
+                endpoint,
+                upstream_request: upstream_request_clone,
             },
         );
 
@@ -1125,7 +1131,46 @@ impl RsipstackBackend {
         }
 
         context.pending.write().await.remove(&call_id);
+        if let Err(err) = self.send_upstream_cancel(&pending_invite).await {
+            warn!(error = %err, "failed to send CANCEL upstream");
+        }
+
         context.media.release(&pending_invite.media_key).await;
+
+        Ok(())
+    }
+
+    async fn send_upstream_cancel(&self, pending: &PendingInvite) -> Result<()> {
+        let mut cancel = pending.upstream_request.clone();
+        cancel.method = Method::Cancel;
+        cancel.body.clear();
+        cancel.headers.unique_push(rsip::Header::ContentLength(
+            rsip::headers::ContentLength::from(0u32),
+        ));
+
+        let seq = cancel
+            .cseq_header()
+            .map_err(Error::sip_stack)?
+            .typed()
+            .map_err(Error::sip_stack)?
+            .seq;
+        let cancel_cseq = typed::CSeq {
+            seq,
+            method: Method::Cancel,
+        };
+        cancel
+            .headers
+            .unique_push(rsip::Header::CSeq(cancel_cseq.into()));
+
+        let mut tx = self
+            .start_client_transaction(
+                pending.endpoint.clone(),
+                cancel,
+                pending.upstream_target.clone(),
+            )
+            .await?;
+
+        tokio::spawn(async move { while tx.receive().await.is_some() {} });
 
         Ok(())
     }
