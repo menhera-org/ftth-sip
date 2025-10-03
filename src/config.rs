@@ -24,6 +24,11 @@ pub struct UpstreamConfig {
     pub bind: BindConfig,
     pub registrar_uri: String,
     pub sip_domain: String,
+    /// IP address used when connecting to the upstream trunk. This can differ from
+    /// the SIP domain when DNS for the trunk is unavailable inside the NGN.
+    pub trunk_addr: IpAddr,
+    /// UDP port used when connecting to the upstream trunk.
+    pub trunk_port: u16,
     pub auth: Option<UpstreamAuth>,
     pub transport: TransportProfile,
 }
@@ -71,6 +76,12 @@ pub struct PortRange {
 impl PortRange {
     pub fn contains(&self, port: u16) -> bool {
         port >= self.min && port <= self.max
+    }
+}
+
+impl UpstreamConfig {
+    pub fn trunk_socket_addr(&self) -> SocketAddr {
+        SocketAddr::new(self.trunk_addr, self.trunk_port)
     }
 }
 

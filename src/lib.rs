@@ -1,7 +1,9 @@
 //! SIP proxy toolkit for NTT East/West Hikari Denwa NGN trunks.
-//! This crate exposes a high-level builder that wires rsipstack transports,
+//! This crate exposes a high-level builder that wires ftth-rsipstack transports,
 //! media relay helpers, and configuration primitives tailored for a single
 //! downstream PBX registration.
+
+mod net;
 
 pub mod config;
 pub mod error;
@@ -33,6 +35,8 @@ mod tests {
                 },
                 registrar_uri: "sip:example.ngn.jp".into(),
                 sip_domain: "example.ngn.jp".into(),
+                trunk_addr: "192.0.2.100".parse().unwrap(),
+                trunk_port: 5060,
                 auth: Some(UpstreamAuth {
                     username: "upstream".into(),
                     password: "secret".into(),

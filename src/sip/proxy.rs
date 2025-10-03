@@ -1,27 +1,31 @@
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::sync::{watch, Mutex, RwLock};
+use ftth_rsipstack::transaction::endpoint::MessageInspector;
+use ftth_rsipstack::transport::udp::{UdpConnection, UdpInner};
+use ftth_rsipstack::transport::{SipAddr, SipConnection, TransportLayer};
+use socket2::{Domain, Protocol, Socket, Type};
+use tokio::net::UdpSocket;
 use tokio::runtime::Builder as RuntimeBuilder;
+use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{BindConfig, ProxyConfig};
 use crate::error::{Error, Result};
 use crate::media::{MediaRelay, MediaRelayBuilder};
+use crate::net::bind_to_device;
 
 use super::registration::{DownstreamRegistration, RegistrationCache};
 
-use rsip::{self, Method, Param, StatusCode};
+use ftth_rsipstack::EndpointBuilder;
+use ftth_rsipstack::transaction::Endpoint;
+use ftth_rsipstack::transaction::transaction::Transaction;
 use rsip::headers::ToTypedHeader;
 use rsip::message::headers_ext::HeadersExt;
-use rsipstack::transport::udp::UdpConnection;
-use rsipstack::transport::TransportLayer;
-use rsipstack::EndpointBuilder;
-use rsipstack::transaction::Endpoint;
-use rsipstack::transaction::transaction::Transaction;
+use rsip::{self, Method, Param, SipMessage, StatusCode};
 use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
@@ -36,6 +40,38 @@ pub struct SipContext {
 pub struct ListenerSockets {
     pub downstream: Mutex<Option<SocketAddr>>,
     pub upstream: Mutex<Option<SocketAddr>>,
+}
+
+#[derive(Debug, Default)]
+struct ProxyMessageInspector;
+
+impl ProxyMessageInspector {
+    fn strip_rport(via: &mut rsip::headers::Via) {
+        if let Ok(mut typed) = via.clone().typed() {
+            typed.params.retain(|param| {
+                !matches!(param, Param::Other(name, _) if name.value().eq_ignore_ascii_case("rport"))
+            });
+            *via = typed.into();
+        }
+    }
+}
+
+impl MessageInspector for ProxyMessageInspector {
+    fn before_send(&self, msg: SipMessage) -> SipMessage {
+        match msg {
+            SipMessage::Request(mut req) => {
+                if let Ok(via) = req.via_header_mut() {
+                    Self::strip_rport(via);
+                }
+                SipMessage::Request(req)
+            }
+            other => other,
+        }
+    }
+
+    fn after_received(&self, msg: SipMessage) -> SipMessage {
+        msg
+    }
 }
 
 pub struct FtthSipProxyBuilder<B = RsipstackBackend> {
@@ -207,7 +243,7 @@ impl SipBackend for RsipstackBackend {
         info!(
             upstream = %context.config.upstream.bind.port,
             downstream = %context.config.downstream.bind.port,
-            "initializing rsipstack backend"
+            "initializing ftth-rsipstack backend"
         );
 
         let cancel = CancellationToken::new();
@@ -223,12 +259,12 @@ impl SipBackend for RsipstackBackend {
         transport_layer.add_transport(upstream_conn.into());
         *context.sockets.upstream.lock().await = Some(upstream_addr);
 
-        let endpoint = Arc::new(
-            EndpointBuilder::new()
-                .with_cancel_token(cancel.clone())
-                .with_transport_layer(transport_layer)
-                .build(),
-        );
+        let mut endpoint_builder = EndpointBuilder::new();
+        endpoint_builder
+            .with_cancel_token(cancel.clone())
+            .with_transport_layer(transport_layer)
+            .with_inspector(Box::new(ProxyMessageInspector::default()));
+        let endpoint = Arc::new(endpoint_builder.build());
 
         {
             let mut guard = self.inner.endpoint.write().await;
@@ -246,7 +282,7 @@ impl SipBackend for RsipstackBackend {
     async fn run(&self, context: SipContext, shutdown: &mut ShutdownSignal) -> Result<()> {
         info!(
             domain = %context.config.upstream.sip_domain,
-            "rsipstack event loop started"
+            "ftth-rsipstack event loop started"
         );
 
         let endpoint = {
@@ -271,9 +307,7 @@ impl SipBackend for RsipstackBackend {
                 .ok_or_else(|| Error::configuration("upstream listener not bound"))?
         };
 
-        let mut incoming = endpoint
-            .incoming_transactions()
-            .map_err(Error::sip_stack)?;
+        let mut incoming = endpoint.incoming_transactions().map_err(Error::sip_stack)?;
         let endpoint_task = endpoint.serve();
         tokio::pin!(endpoint_task);
 
@@ -312,7 +346,7 @@ impl SipBackend for RsipstackBackend {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        info!("rsipstack backend shutting down");
+        info!("ftth-rsipstack backend shutting down");
         if let Some(endpoint) = self.inner.endpoint.write().await.take() {
             endpoint.shutdown();
         }
@@ -327,19 +361,52 @@ async fn create_udp_listener(
     bind: &BindConfig,
     cancel_token: CancellationToken,
 ) -> Result<(UdpConnection, SocketAddr)> {
+    let socket = Socket::new(
+        Domain::for_address(bind.socket_addr()),
+        Type::DGRAM,
+        Some(Protocol::UDP),
+    )
+    .map_err(Error::Transport)?;
+    socket.set_reuse_address(true).map_err(Error::Transport)?;
+
     if let Some(interface) = &bind.interface {
-        warn!(interface, "SO_BINDTODEVICE is not yet implemented; binding without interface isolation");
+        if let Err(err) = bind_to_device(&socket, interface) {
+            return Err(match err {
+                Error::Transport(io_err) => Error::Transport(io_err),
+                Error::Media(msg) => {
+                    Error::Transport(std::io::Error::new(std::io::ErrorKind::Other, msg))
+                }
+                other => other,
+            });
+        }
     }
 
-    let connection = UdpConnection::create_connection(bind.socket_addr(), None, Some(cancel_token))
-        .await
-        .map_err(Error::sip_stack)?;
-    let addr = connection
-        .get_addr()
-        .get_socketaddr()
-        .map_err(Error::sip_stack)?;
+    socket
+        .bind(&bind.socket_addr().into())
+        .map_err(Error::Transport)?;
+    socket.set_nonblocking(true).map_err(Error::Transport)?;
 
-    Ok((connection, addr))
+    let std_socket: std::net::UdpSocket = socket.into();
+    std_socket.set_nonblocking(true).map_err(Error::Transport)?;
+
+    let udp_socket = UdpSocket::from_std(std_socket).map_err(Error::Transport)?;
+    let local_addr = udp_socket.local_addr().map_err(Error::Transport)?;
+
+    let resolved = SipConnection::resolve_bind_address(local_addr);
+    let mut sip_addr: SipAddr = resolved.into();
+    sip_addr.r#type = Some(rsip::transport::Transport::Udp);
+
+    let connection = UdpConnection::attach(
+        UdpInner {
+            conn: udp_socket,
+            addr: sip_addr,
+        },
+        None,
+        Some(cancel_token),
+    )
+    .await;
+
+    Ok((connection, local_addr))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,7 +457,8 @@ impl RsipstackBackend {
             Ok(TransactionDirection::Upstream)
         } else {
             Err(Error::Media(format!(
-                "transaction arrived on unknown local address {local_addr}")))
+                "transaction arrived on unknown local address {local_addr}"
+            )))
         }
     }
 
@@ -438,9 +506,7 @@ impl RsipstackBackend {
 
         if expires_secs == 0 {
             context.registrations.write().await.clear();
-            tx.reply(StatusCode::OK)
-                .await
-                .map_err(Error::sip_stack)?;
+            tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
             return Ok(());
         }
 
@@ -462,9 +528,7 @@ impl RsipstackBackend {
 
         context.registrations.write().await.upsert(registration);
 
-        tx.reply(StatusCode::OK)
-            .await
-            .map_err(Error::sip_stack)?;
+        tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
         Ok(())
     }
 }
@@ -475,11 +539,7 @@ fn resolve_remote_from_via(via: &rsip::headers::Via) -> Result<SocketAddr, Strin
         .map_err(|err| format!("failed to parse Via header: {err}"))?;
 
     let mut host = via.sent_by().host().clone();
-    let mut port = via
-        .sent_by()
-        .port()
-        .map(|p| *p.value())
-        .unwrap_or(5060);
+    let mut port = via.sent_by().port().map(|p| *p.value()).unwrap_or(5060);
 
     match via.received() {
         Ok(Some(received)) => {

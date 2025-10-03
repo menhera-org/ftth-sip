@@ -8,11 +8,12 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::{BindConfig, MediaConfig};
 use crate::error::{Error, Result};
+use crate::net::bind_to_device;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MediaSessionKey {
@@ -62,18 +63,10 @@ impl MediaSessionHandle {
         )
     }
 
-    pub async fn set_downstream_endpoints(
-        &self,
-        rtp: SocketAddr,
-        rtcp: Option<SocketAddr>,
-    ) {
-        self.inner
-            .downstream_state
-            .rtp
-            .write()
-            .await
-            .replace(rtp);
-        let rtcp_addr = rtcp.unwrap_or_else(|| SocketAddr::new(rtp.ip(), rtp.port().saturating_add(1)));
+    pub async fn set_downstream_endpoints(&self, rtp: SocketAddr, rtcp: Option<SocketAddr>) {
+        self.inner.downstream_state.rtp.write().await.replace(rtp);
+        let rtcp_addr =
+            rtcp.unwrap_or_else(|| SocketAddr::new(rtp.ip(), rtp.port().saturating_add(1)));
         self.inner
             .downstream_state
             .rtcp
@@ -85,7 +78,8 @@ impl MediaSessionHandle {
 
     pub async fn set_upstream_endpoints(&self, rtp: SocketAddr, rtcp: Option<SocketAddr>) {
         self.inner.upstream_state.rtp.write().await.replace(rtp);
-        let rtcp_addr = rtcp.unwrap_or_else(|| SocketAddr::new(rtp.ip(), rtp.port().saturating_add(1)));
+        let rtcp_addr =
+            rtcp.unwrap_or_else(|| SocketAddr::new(rtp.ip(), rtp.port().saturating_add(1)));
         self.inner
             .upstream_state
             .rtcp
@@ -417,15 +411,27 @@ fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16) -> Result<SdpRewrite> 
     let mut remote_rtp: Option<u16> = None;
     let mut remote_rtcp: Option<u16> = None;
     let mut rewritten = Vec::new();
+    let mut has_pcmu_payload = false;
+    let mut has_rtpmap_pcmu = false;
 
     for line in body.lines() {
         if let Some(rest) = line.strip_prefix("c=IN IP4 ") {
-            remote_ip = Some(rest.trim().parse::<std::net::Ipv4Addr>().map(IpAddr::V4).map_err(|err| Error::Media(err.to_string()))?);
+            remote_ip = Some(
+                rest.trim()
+                    .parse::<std::net::Ipv4Addr>()
+                    .map(IpAddr::V4)
+                    .map_err(|err| Error::Media(err.to_string()))?,
+            );
             rewritten.push(format!("c=IN IP4 {}", new_ip));
             continue;
         }
         if let Some(rest) = line.strip_prefix("c=IN IP6 ") {
-            remote_ip = Some(rest.trim().parse::<std::net::Ipv6Addr>().map(IpAddr::V6).map_err(|err| Error::Media(err.to_string()))?);
+            remote_ip = Some(
+                rest.trim()
+                    .parse::<std::net::Ipv6Addr>()
+                    .map(IpAddr::V6)
+                    .map_err(|err| Error::Media(err.to_string()))?,
+            );
             rewritten.push(format!("c=IN IP6 {}", new_ip));
             continue;
         }
@@ -434,13 +440,27 @@ fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16) -> Result<SdpRewrite> 
             let port_str = parts
                 .next()
                 .ok_or_else(|| Error::Media("missing port in m=audio".into()))?;
-            let port = port_str.parse::<u16>().map_err(|err| Error::Media(err.to_string()))?;
+            let port = port_str
+                .parse::<u16>()
+                .map_err(|err| Error::Media(err.to_string()))?;
             remote_rtp = Some(port);
-            let remainder: String = parts.collect::<Vec<_>>().join(" ");
-            if remainder.is_empty() {
-                rewritten.push(format!("m=audio {}", new_port));
+            let proto = parts
+                .next()
+                .ok_or_else(|| Error::Media("missing transport protocol in m=audio".into()))?;
+            let payloads: Vec<&str> = parts.collect();
+            let mut filtered: Vec<&str> = payloads.into_iter().filter(|fmt| *fmt == "0").collect();
+            if filtered.is_empty() {
+                filtered.push("0");
+            }
+            has_pcmu_payload = true;
+            let payload_section = filtered.join(" ");
+            if payload_section.is_empty() {
+                rewritten.push(format!("m=audio {} {}", new_port, proto));
             } else {
-                rewritten.push(format!("m=audio {} {}", new_port, remainder));
+                rewritten.push(format!(
+                    "m=audio {} {} {}",
+                    new_port, proto, payload_section
+                ));
             }
             continue;
         }
@@ -449,7 +469,9 @@ fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16) -> Result<SdpRewrite> 
             let port_str = parts
                 .next()
                 .ok_or_else(|| Error::Media("missing port in a=rtcp".into()))?;
-            let port = port_str.parse::<u16>().map_err(|err| Error::Media(err.to_string()))?;
+            let port = port_str
+                .parse::<u16>()
+                .map_err(|err| Error::Media(err.to_string()))?;
             remote_rtcp = Some(port);
             let remainder: String = parts.collect::<Vec<_>>().join(" ");
             let rewritten_port = new_port.saturating_add(1);
@@ -460,12 +482,40 @@ fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16) -> Result<SdpRewrite> 
             }
             continue;
         }
+        if let Some(rest) = line.strip_prefix("a=rtpmap:") {
+            let mut parts = rest.split_whitespace();
+            let payload = parts
+                .next()
+                .ok_or_else(|| Error::Media("invalid a=rtpmap syntax".into()))?;
+            if payload == "0" {
+                has_rtpmap_pcmu = true;
+                rewritten.push("a=rtpmap:0 PCMU/8000".to_string());
+            }
+            continue;
+        }
+        if line.starts_with("a=fmtp:") {
+            if line.starts_with("a=fmtp:0") {
+                rewritten.push(line.to_string());
+            }
+            continue;
+        }
+        if line.starts_with("a=rtcp-fb:") {
+            if line.starts_with("a=rtcp-fb:0") {
+                rewritten.push(line.to_string());
+            }
+            continue;
+        }
         rewritten.push(line.to_string());
     }
 
     let remote_ip = remote_ip.ok_or_else(|| Error::Media("missing connection address".into()))?;
-    let remote_rtp_port = remote_rtp.ok_or_else(|| Error::Media("missing audio media port".into()))?;
+    let remote_rtp_port =
+        remote_rtp.ok_or_else(|| Error::Media("missing audio media port".into()))?;
     let remote_rtcp_port = remote_rtcp.unwrap_or_else(|| remote_rtp_port.saturating_add(1));
+
+    if has_pcmu_payload && !has_rtpmap_pcmu {
+        rewritten.push("a=rtpmap:0 PCMU/8000".into());
+    }
 
     let mut sdp = rewritten.join(newline);
     if body.ends_with('\n') {
@@ -485,16 +535,7 @@ fn bind_udp_socket(bind: &BindConfig, port: u16) -> Result<UdpSocket> {
     socket.set_reuse_address(true)?;
 
     if let Some(iface) = &bind.interface {
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        {
-            return Err(Error::Media(
-                format!("interface binding not supported on this platform ({iface})"),
-            ));
-        }
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        {
-            tracing::warn!(interface = iface.as_str(), "SO_BINDTODEVICE not configured in media relay yet");
-        }
+        bind_to_device(&socket, iface)?;
     }
 
     let addr = SocketAddr::new(bind.address, port);
