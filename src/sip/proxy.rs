@@ -59,6 +59,7 @@ pub struct CallContext {
     pub upstream_contact: Option<Uri>,
     pub downstream_contact: Option<Uri>,
     pub upstream_to_tag: Option<String>,
+    pub downstream_target: SipAddr,
 }
 
 #[allow(dead_code)]
@@ -72,6 +73,7 @@ struct PendingInvite {
     cancel_token: CancellationToken,
     endpoint: Arc<Endpoint>,
     upstream_request: rsip::Request,
+    downstream_target: SipAddr,
 }
 
 impl std::fmt::Debug for PendingInvite {
@@ -538,6 +540,71 @@ impl RsipstackBackend {
         target
     }
 
+    fn prepare_downstream_request(
+        endpoint: &Endpoint,
+        downstream_listener: SocketAddr,
+        call: &CallContext,
+        original: &rsip::Request,
+        body_override: Option<Vec<u8>>,
+    ) -> Result<rsip::Request> {
+        let mut request = original.clone();
+
+        if let Some(body) = body_override {
+            request.body = body;
+        }
+
+        let content_length = request.body.len() as u32;
+        request.headers.unique_push(rsip::Header::ContentLength(
+            rsip::headers::ContentLength::from(content_length),
+        ));
+
+        request
+            .headers
+            .retain(|header| !matches!(header, rsip::Header::Via(_)));
+
+        if let Some(contact) = &call.downstream_contact {
+            request.uri = contact.clone();
+        }
+
+        let mut via_addr: SipAddr = downstream_listener.into();
+        via_addr.r#type = Some(Transport::Udp);
+        let via = endpoint
+            .inner
+            .get_via(Some(via_addr.clone()), None)
+            .map_err(Error::sip_stack)?;
+        request.headers.unique_push(rsip::Header::Via(via.into()));
+
+        let max_forwards = request
+            .max_forwards_header()
+            .ok()
+            .and_then(|mf| mf.num().ok())
+            .and_then(|value| value.checked_sub(1))
+            .unwrap_or(69);
+        request
+            .headers
+            .unique_push(rsip::Header::MaxForwards(rsip::headers::MaxForwards::from(
+                max_forwards,
+            )));
+
+        Ok(request)
+    }
+
+    fn sip_addr_from_uri(uri: &Uri) -> Result<SipAddr> {
+        let port = uri.host_with_port.port.map(|p| *p.value()).unwrap_or(5060);
+
+        let ip = match &uri.host_with_port.host {
+            rsip::host_with_port::Host::IpAddr(addr) => *addr,
+            rsip::host_with_port::Host::Domain(domain) => domain
+                .to_string()
+                .parse::<IpAddr>()
+                .map_err(|err| Error::Media(err.to_string()))?,
+        };
+
+        let mut sip: SipAddr = SocketAddr::new(ip, port).into();
+        sip.r#type = Some(Transport::Udp);
+        Ok(sip)
+    }
+
     async fn start_client_transaction(
         &self,
         endpoint: Arc<Endpoint>,
@@ -597,13 +664,13 @@ impl RsipstackBackend {
                                     .map_err(Error::sip_stack)?;
                             }
 
-                    match upstream_response.status_code.kind() {
-                        StatusCodeKind::Provisional => {}
-                        _ => {
-                            final_status = Some(upstream_response.status_code.clone());
-                            final_response = Some(upstream_response);
-                            break;
-                        }
+                            match upstream_response.status_code.kind() {
+                                StatusCodeKind::Provisional => {}
+                                _ => {
+                                    final_status = Some(upstream_response.status_code.clone());
+                                    final_response = Some(upstream_response);
+                                    break;
+                                }
                             }
                         }
                         Some(SipMessage::Request(_)) => {
@@ -651,6 +718,7 @@ impl RsipstackBackend {
                         upstream_contact: upstream_contact_uri,
                         downstream_contact: pending.downstream_contact,
                         upstream_to_tag,
+                        downstream_target: pending.downstream_target,
                     },
                 );
             }
@@ -859,6 +927,27 @@ impl RsipstackBackend {
             .ok()
             .and_then(|header| header.typed().ok().map(|typed| typed.uri));
 
+        let registration_source = {
+            let guard = context.registrations.read().await;
+            guard.get().map(|reg| reg.source)
+        };
+
+        let downstream_target = downstream_contact_uri
+            .as_ref()
+            .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
+            .or_else(|| {
+                registration_source.map(|addr| {
+                    let mut sip: SipAddr = addr.into();
+                    sip.r#type = Some(Transport::Udp);
+                    sip
+                })
+            })
+            .unwrap_or_else(|| {
+                let mut sip: SipAddr = context.config.downstream.bind.socket_addr().into();
+                sip.r#type = Some(Transport::Udp);
+                sip
+            });
+
         let downstream_tx = Arc::new(Mutex::new(tx));
         {
             let mut guard = downstream_tx.lock().await;
@@ -934,6 +1023,7 @@ impl RsipstackBackend {
                 cancel_token,
                 endpoint,
                 upstream_request: upstream_request_clone,
+                downstream_target: downstream_target.clone(),
             },
         );
 
@@ -1009,13 +1099,6 @@ impl RsipstackBackend {
         tx: &mut Transaction,
         direction: TransactionDirection,
     ) -> Result<()> {
-        if direction != TransactionDirection::Downstream {
-            tx.reply(StatusCode::NotImplemented)
-                .await
-                .map_err(Error::sip_stack)?;
-            return Ok(());
-        }
-
         let call_id = tx
             .original
             .call_id_header()
@@ -1033,62 +1116,130 @@ impl RsipstackBackend {
             }
         };
 
-        let endpoint = {
-            let guard = self.inner.endpoint.read().await;
-            guard
-                .as_ref()
-                .cloned()
-                .ok_or_else(|| Error::configuration("endpoint not initialized"))?
-        };
+        match direction {
+            TransactionDirection::Downstream => {
+                let endpoint = {
+                    let guard = self.inner.endpoint.read().await;
+                    guard
+                        .as_ref()
+                        .cloned()
+                        .ok_or_else(|| Error::configuration("endpoint not initialized"))?
+                };
 
-        let upstream_listener = {
-            let guard = context.sockets.upstream.lock().await;
-            guard
-                .clone()
-                .ok_or_else(|| Error::configuration("upstream listener not bound"))?
-        };
+                let upstream_listener = {
+                    let guard = context.sockets.upstream.lock().await;
+                    guard
+                        .clone()
+                        .ok_or_else(|| Error::configuration("upstream listener not bound"))?
+                };
 
-        let config = context.config.as_ref();
-        let upstream_request = Self::prepare_upstream_request(
-            &endpoint,
-            upstream_listener,
-            &config.upstream,
-            &config.downstream.user_agent.username,
-            &tx.original,
-            None,
-        )?;
+                let config = context.config.as_ref();
+                let upstream_request = Self::prepare_upstream_request(
+                    &endpoint,
+                    upstream_listener,
+                    &config.upstream,
+                    &config.downstream.user_agent.username,
+                    &tx.original,
+                    None,
+                )?;
 
-        let mut client_tx = self
-            .start_client_transaction(endpoint, upstream_request, call.upstream_target.clone())
-            .await?;
+                let mut client_tx = self
+                    .start_client_transaction(
+                        endpoint,
+                        upstream_request,
+                        call.upstream_target.clone(),
+                    )
+                    .await?;
 
-        let mut responded = false;
-        while let Some(message) = client_tx.receive().await {
-            match message {
-                SipMessage::Response(response) => {
-                    let status = response.status_code.clone();
-                    tx.respond(response).await.map_err(Error::sip_stack)?;
-                    responded = true;
-                    if matches!(status.kind(), StatusCodeKind::Provisional) {
-                        continue;
+                let mut responded = false;
+                while let Some(message) = client_tx.receive().await {
+                    match message {
+                        SipMessage::Response(response) => {
+                            let status = response.status_code.clone();
+                            tx.respond(response).await.map_err(Error::sip_stack)?;
+                            responded = true;
+                            if matches!(status.kind(), StatusCodeKind::Provisional) {
+                                continue;
+                            }
+                            if matches!(status.kind(), StatusCodeKind::Successful) {
+                                context.media.release(&call.media_key).await;
+                                context.calls.write().await.remove(&call_id);
+                            }
+                            break;
+                        }
+                        SipMessage::Request(_) => {}
                     }
-                    if matches!(status.kind(), StatusCodeKind::Successful) {
-                        context.media.release(&call.media_key).await;
-                        context.calls.write().await.remove(&call_id);
-                    }
-                    break;
                 }
-                SipMessage::Request(_) => {}
+
+                if !responded {
+                    tx.reply(StatusCode::RequestTimeout)
+                        .await
+                        .map_err(Error::sip_stack)?;
+                }
+
+                Ok(())
+            }
+            TransactionDirection::Upstream => {
+                let endpoint = {
+                    let guard = self.inner.endpoint.read().await;
+                    guard
+                        .as_ref()
+                        .cloned()
+                        .ok_or_else(|| Error::configuration("endpoint not initialized"))?
+                };
+
+                let downstream_listener = {
+                    let guard = context.sockets.downstream.lock().await;
+                    guard
+                        .clone()
+                        .ok_or_else(|| Error::configuration("downstream listener not bound"))?
+                };
+
+                let downstream_request = Self::prepare_downstream_request(
+                    &endpoint,
+                    downstream_listener,
+                    &call,
+                    &tx.original,
+                    None,
+                )?;
+
+                let mut client_tx = self
+                    .start_client_transaction(
+                        endpoint,
+                        downstream_request,
+                        call.downstream_target.clone(),
+                    )
+                    .await?;
+
+                let mut responded = false;
+                while let Some(message) = client_tx.receive().await {
+                    match message {
+                        SipMessage::Response(response) => {
+                            let status = response.status_code.clone();
+                            tx.respond(response).await.map_err(Error::sip_stack)?;
+                            responded = true;
+                            if matches!(status.kind(), StatusCodeKind::Provisional) {
+                                continue;
+                            }
+                            if matches!(status.kind(), StatusCodeKind::Successful) {
+                                context.media.release(&call.media_key).await;
+                                context.calls.write().await.remove(&call_id);
+                            }
+                            break;
+                        }
+                        SipMessage::Request(_) => {}
+                    }
+                }
+
+                if !responded {
+                    tx.reply(StatusCode::RequestTimeout)
+                        .await
+                        .map_err(Error::sip_stack)?;
+                }
+
+                Ok(())
             }
         }
-
-        if !responded {
-            tx.reply(StatusCode::RequestTimeout)
-                .await
-                .map_err(Error::sip_stack)?;
-        }
-
-        Ok(())
     }
 
     async fn handle_cancel(
