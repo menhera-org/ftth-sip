@@ -594,13 +594,13 @@ impl RsipstackBackend {
                                     .map_err(Error::sip_stack)?;
                             }
 
-                            match upstream_response.status_code.kind() {
-                                StatusCodeKind::Provisional => {}
-                                _ => {
-                                    final_status = Some(upstream_response.status_code.clone());
-                                    final_response = Some(upstream_response);
-                                    break;
-                                }
+                    match upstream_response.status_code.kind() {
+                        StatusCodeKind::Provisional => {}
+                        _ => {
+                            final_status = Some(upstream_response.status_code.clone());
+                            final_response = Some(upstream_response);
+                            break;
+                        }
                             }
                         }
                         Some(SipMessage::Request(_)) => {
@@ -675,6 +675,7 @@ impl RsipstackBackend {
             Method::Register => self.handle_register(context, &mut tx, direction).await,
             Method::Options => self.handle_options(context, &mut tx, direction).await,
             Method::Ack => self.handle_ack(context, &mut tx, direction).await,
+            Method::Cancel => self.handle_cancel(context, &mut tx, direction).await,
             Method::Bye => self.handle_bye(context, &mut tx, direction).await,
             _ => {
                 tx.reply(StatusCode::NotImplemented)
@@ -1076,6 +1077,55 @@ impl RsipstackBackend {
                 .await
                 .map_err(Error::sip_stack)?;
         }
+
+        Ok(())
+    }
+
+    async fn handle_cancel(
+        &self,
+        context: SipContext,
+        tx: &mut Transaction,
+        direction: TransactionDirection,
+    ) -> Result<()> {
+        let call_id = tx
+            .original
+            .call_id_header()
+            .map_err(Error::sip_stack)?
+            .value()
+            .to_string();
+
+        let pending_invite = {
+            let guard = context.pending.read().await;
+            guard.get(&call_id).cloned()
+        };
+
+        let Some(pending_invite) = pending_invite else {
+            tx.reply(StatusCode::CallTransactionDoesNotExist)
+                .await
+                .map_err(Error::sip_stack)?;
+            return Ok(());
+        };
+
+        pending_invite.cancel_token.cancel();
+
+        if direction != TransactionDirection::Downstream {
+            tx.reply(StatusCode::NotImplemented)
+                .await
+                .map_err(Error::sip_stack)?;
+            return Ok(());
+        }
+
+        tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
+
+        {
+            let mut downstream = pending_invite.downstream_tx.lock().await;
+            if let Err(err) = downstream.reply(StatusCode::RequestTerminated).await {
+                warn!(error = %err, "failed to send 487 to downstream INVITE");
+            }
+        }
+
+        context.pending.write().await.remove(&call_id);
+        context.media.release(&pending_invite.media_key).await;
 
         Ok(())
     }
