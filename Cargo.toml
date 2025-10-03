@@ -8,7 +8,7 @@ default = ["telemetry"]
 telemetry = ["tracing-subscriber"]
 
 [dependencies]
-ftth-rsipstack = { version = "1.0.0", default-features = false }
+ftth-rsipstack = "2"
 rsip = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 async-trait = "0.1"

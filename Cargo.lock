@@ -377,9 +377,9 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "ftth-rsipstack"
-version = "1.0.0"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23da30a73fb732cd2d33ab8882b87bfcec6d6b18f63ab8fe7187f88149d9ce26"
+checksum = "e068e091d8b0a4ec34e969556fb545e40fafef6002584857a585797c9b55d3fc"
 dependencies = [
  "async-trait",
  "bytes",
