@@ -1224,13 +1224,6 @@ impl RsipstackBackend {
         direction: TransactionDirection,
     ) -> Result<()> {
         let mut tx = tx;
-        if direction != TransactionDirection::Downstream {
-            tx.reply(StatusCode::MethodNotAllowed)
-                .await
-                .map_err(Error::sip_stack)?;
-            return Ok(());
-        }
-
         let call_id = tx
             .original
             .call_id_header()
@@ -1238,12 +1231,8 @@ impl RsipstackBackend {
             .value()
             .to_string();
 
-        if let Some(existing_call) = { context.calls.read().await.get(&call_id).cloned() } {
-            let mut transaction = tx;
-            return self
-                .relay_dialog_request(context, &mut transaction, call_id, existing_call, direction)
-                .await;
-        }
+        let existing_call = { context.calls.read().await.get(&call_id).cloned() };
+
         let from_tag = tx
             .original
             .from_header()
@@ -1256,134 +1245,176 @@ impl RsipstackBackend {
             dialog_tag: from_tag.clone(),
         };
 
-        let downstream_contact_uri = tx
-            .original
-            .contact_header()
-            .ok()
-            .and_then(|header| header.typed().ok().map(|typed| typed.uri));
+        match direction {
+            TransactionDirection::Downstream => {
+                if let Some(call) = existing_call {
+                    return self
+                        .relay_dialog_request(context, &mut tx, call_id, call, direction)
+                        .await;
+                }
 
-        let identity = match Self::select_identity(&tx.original, &context.config.upstream) {
-            Some(identity) => identity,
-            None => {
-                tx.reply(StatusCode::Forbidden)
+                let downstream_contact_uri = tx
+                    .original
+                    .contact_header()
+                    .ok()
+                    .and_then(|header| header.typed().ok().map(|typed| typed.uri));
+
+                let identity = match Self::select_identity(&tx.original, &context.config.upstream) {
+                    Some(identity) => identity,
+                    None => {
+                        tx.reply(StatusCode::Forbidden)
+                            .await
+                            .map_err(Error::sip_stack)?;
+                        return Ok(());
+                    }
+                };
+
+                let registration_source = {
+                    let guard = context.registrations.read().await;
+                    guard.get().map(|reg| reg.source)
+                };
+
+                let downstream_target = downstream_contact_uri
+                    .as_ref()
+                    .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
+                    .or_else(|| {
+                        registration_source.map(|addr| {
+                            let mut sip: SipAddr = addr.into();
+                            sip.r#type = Some(Transport::Udp);
+                            sip
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        let mut sip: SipAddr = context.config.downstream.bind.socket_addr().into();
+                        sip.r#type = Some(Transport::Udp);
+                        sip
+                    });
+
+                let downstream_tx = Arc::new(Mutex::new(tx));
+                {
+                    let mut guard = downstream_tx.lock().await;
+                    guard.send_trying().await.map_err(Error::sip_stack)?;
+                }
+
+                let media_session = context.media.allocate(media_key.clone()).await?;
+
+                let original_request = {
+                    let guard = downstream_tx.lock().await;
+                    guard.original.clone()
+                };
+
+                let mut rewritten_body: Option<Vec<u8>> = None;
+                if !original_request.body.is_empty() {
+                    let body = String::from_utf8(original_request.body.clone())
+                        .map_err(|err| Error::Media(err.to_string()))?;
+                    let rewrite = media_session.rewrite_for_upstream(&body)?;
+                    media_session
+                        .set_downstream_endpoints(rewrite.remote_rtp, Some(rewrite.remote_rtcp))
+                        .await;
+                    rewritten_body = Some(rewrite.sdp.into_bytes());
+                }
+
+                let endpoint = {
+                    let guard = self.inner.endpoint.read().await;
+                    guard
+                        .as_ref()
+                        .cloned()
+                        .ok_or_else(|| Error::configuration("endpoint not initialized"))?
+                };
+
+                let upstream_listener = {
+                    let guard = context.sockets.upstream.lock().await;
+                    guard
+                        .clone()
+                        .ok_or_else(|| Error::configuration("upstream listener not bound"))?
+                };
+
+                let config = context.config.as_ref();
+                let upstream_request = Self::prepare_upstream_request(
+                    &endpoint,
+                    upstream_listener,
+                    &config.upstream,
+                    &original_request,
+                    rewritten_body,
+                    &identity,
+                )?;
+
+                let target = Self::build_trunk_target(&config.upstream);
+                let upstream_request_clone = upstream_request.clone();
+                let client_tx = self
+                    .start_client_transaction(endpoint.clone(), upstream_request, target.clone())
+                    .await?;
+
+                let cancel_token = CancellationToken::new();
+
+                let task_downstream = downstream_tx.clone();
+                let task_media = media_session.clone();
+                let task_cancel = cancel_token.clone();
+                let backend = self.clone();
+                let context_clone = context.clone();
+                let call_id_clone = call_id.clone();
+
+                context.pending.write().await.insert(
+                    call_id.clone(),
+                    PendingInvite {
+                        downstream_tx,
+                        media: media_session,
+                        media_key,
+                        upstream_target: target,
+                        downstream_contact: downstream_contact_uri,
+                        cancel_token,
+                        endpoint,
+                        upstream_request: upstream_request_clone,
+                        downstream_target: downstream_target.clone(),
+                        identity: identity.clone(),
+                    },
+                );
+
+                tokio::spawn(async move {
+                    let result = backend
+                        .forward_upstream_responses(
+                            client_tx,
+                            task_downstream,
+                            task_media,
+                            task_cancel,
+                        )
+                        .await;
+                    backend
+                        .finalize_invite_result(context_clone, call_id_clone, result)
+                        .await;
+                });
+
+                Ok(())
+            }
+            TransactionDirection::Upstream => {
+                if let Some(call) = existing_call {
+                    return self
+                        .relay_dialog_request(context, &mut tx, call_id, call, direction)
+                        .await;
+                }
+
+                let registration = {
+                    let guard = context.registrations.read().await;
+                    guard.get().cloned()
+                };
+
+                let _registration = match registration {
+                    Some(reg) if reg.is_active(Instant::now()) => reg,
+                    _ => {
+                        tx.reply(StatusCode::TemporarilyUnavailable)
+                            .await
+                            .map_err(Error::sip_stack)?;
+                        return Ok(());
+                    }
+                };
+
+                // Step 2 will forward upstream INVITEs; for now, respond 501 to indicate not yet implemented.
+                tx.reply(StatusCode::NotImplemented)
                     .await
                     .map_err(Error::sip_stack)?;
-                return Ok(());
+                Ok(())
             }
-        };
-
-        let registration_source = {
-            let guard = context.registrations.read().await;
-            guard.get().map(|reg| reg.source)
-        };
-
-        let downstream_target = downstream_contact_uri
-            .as_ref()
-            .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
-            .or_else(|| {
-                registration_source.map(|addr| {
-                    let mut sip: SipAddr = addr.into();
-                    sip.r#type = Some(Transport::Udp);
-                    sip
-                })
-            })
-            .unwrap_or_else(|| {
-                let mut sip: SipAddr = context.config.downstream.bind.socket_addr().into();
-                sip.r#type = Some(Transport::Udp);
-                sip
-            });
-
-        let downstream_tx = Arc::new(Mutex::new(tx));
-        {
-            let mut guard = downstream_tx.lock().await;
-            guard.send_trying().await.map_err(Error::sip_stack)?;
         }
-
-        let media_session = context.media.allocate(media_key.clone()).await?;
-
-        let original_request = {
-            let guard = downstream_tx.lock().await;
-            guard.original.clone()
-        };
-
-        let mut rewritten_body: Option<Vec<u8>> = None;
-        if !original_request.body.is_empty() {
-            let body = String::from_utf8(original_request.body.clone())
-                .map_err(|err| Error::Media(err.to_string()))?;
-            let rewrite = media_session.rewrite_for_upstream(&body)?;
-            media_session
-                .set_downstream_endpoints(rewrite.remote_rtp, Some(rewrite.remote_rtcp))
-                .await;
-            rewritten_body = Some(rewrite.sdp.into_bytes());
-        }
-
-        let endpoint = {
-            let guard = self.inner.endpoint.read().await;
-            guard
-                .as_ref()
-                .cloned()
-                .ok_or_else(|| Error::configuration("endpoint not initialized"))?
-        };
-
-        let upstream_listener = {
-            let guard = context.sockets.upstream.lock().await;
-            guard
-                .clone()
-                .ok_or_else(|| Error::configuration("upstream listener not bound"))?
-        };
-
-        let config = context.config.as_ref();
-
-        let upstream_request = Self::prepare_upstream_request(
-            &endpoint,
-            upstream_listener,
-            &config.upstream,
-            &original_request,
-            rewritten_body,
-            &identity,
-        )?;
-
-        let target = Self::build_trunk_target(&config.upstream);
-        let upstream_request_clone = upstream_request.clone();
-        let client_tx = self
-            .start_client_transaction(endpoint.clone(), upstream_request, target.clone())
-            .await?;
-
-        let cancel_token = CancellationToken::new();
-
-        let task_downstream = downstream_tx.clone();
-        let task_media = media_session.clone();
-        let task_cancel = cancel_token.clone();
-        let backend = self.clone();
-        let context_clone = context.clone();
-        let call_id_clone = call_id.clone();
-
-        context.pending.write().await.insert(
-            call_id.clone(),
-            PendingInvite {
-                downstream_tx,
-                media: media_session,
-                media_key,
-                upstream_target: target,
-                downstream_contact: downstream_contact_uri,
-                cancel_token,
-                endpoint,
-                upstream_request: upstream_request_clone,
-                downstream_target: downstream_target.clone(),
-                identity: identity.clone(),
-            },
-        );
-
-        tokio::spawn(async move {
-            let result = backend
-                .forward_upstream_responses(client_tx, task_downstream, task_media, task_cancel)
-                .await;
-            backend
-                .finalize_invite_result(context_clone, call_id_clone, result)
-                .await;
-        });
-
-        Ok(())
     }
 
     async fn handle_ack(
