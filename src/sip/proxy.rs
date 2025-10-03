@@ -1187,7 +1187,7 @@ impl RsipstackBackend {
                 Ok(())
             }
             TransactionDirection::Upstream => {
-                let mut call = stored_call.clone();
+                let mut call = stored_call;
 
                 if let Some(contact) = tx
                     .original
