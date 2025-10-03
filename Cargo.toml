@@ -1,0 +1,26 @@
+[package]
+name = "ftth-sip"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["telemetry"]
+telemetry = ["tracing-subscriber"]
+
+[dependencies]
+rsipstack = { package = "ftth-rsipstack", version = "1.0.0", default-features = false }
+rsip = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+async-trait = "0.1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", optional = true, features = ["fmt", "env-filter", "ansi"] }
+bytes = "1"
+tokio-util = "0.7"
+socket2 = "0.6"
+serde = { version = "1", features = ["derive"], optional = true }
+serde_with = { version = "3", optional = true }
+config = { version = "0.15", optional = true }
+
+[dev-dependencies]
+anyhow = "1"
