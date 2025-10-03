@@ -1112,7 +1112,7 @@ impl RsipstackBackend {
             .value()
             .to_string();
 
-        let call = match context.calls.read().await.get(&call_id).cloned() {
+        let stored_call = match context.calls.read().await.get(&call_id).cloned() {
             Some(call) => call,
             None => {
                 tx.reply(StatusCode::CallTransactionDoesNotExist)
@@ -1124,6 +1124,7 @@ impl RsipstackBackend {
 
         match direction {
             TransactionDirection::Downstream => {
+                let call = stored_call.clone();
                 let endpoint = {
                     let guard = self.inner.endpoint.read().await;
                     guard
@@ -1186,7 +1187,7 @@ impl RsipstackBackend {
                 Ok(())
             }
             TransactionDirection::Upstream => {
-                let mut call = call;
+                let mut call = stored_call.clone();
 
                 if let Some(contact) = tx
                     .original
