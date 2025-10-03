@@ -1118,30 +1118,40 @@ impl RsipstackBackend {
 
         pending_invite.cancel_token.cancel();
 
-        if direction != TransactionDirection::Downstream {
-            tx.reply(StatusCode::NotImplemented)
-                .await
-                .map_err(Error::sip_stack)?;
-            return Ok(());
-        }
+        match direction {
+            TransactionDirection::Downstream => {
+                tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
 
-        tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
+                {
+                    let mut downstream = pending_invite.downstream_tx.lock().await;
+                    if let Err(err) = downstream.reply(StatusCode::RequestTerminated).await {
+                        warn!(error = %err, "failed to send 487 to downstream INVITE");
+                    }
+                }
 
-        {
-            let mut downstream = pending_invite.downstream_tx.lock().await;
-            if let Err(err) = downstream.reply(StatusCode::RequestTerminated).await {
-                warn!(error = %err, "failed to send 487 to downstream INVITE");
+                context.pending.write().await.remove(&call_id);
+                if let Err(err) = self.send_upstream_cancel(&pending_invite).await {
+                    warn!(error = %err, "failed to send CANCEL upstream");
+                }
+
+                context.media.release(&pending_invite.media_key).await;
+                Ok(())
+            }
+            TransactionDirection::Upstream => {
+                tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
+
+                {
+                    let mut downstream = pending_invite.downstream_tx.lock().await;
+                    if let Err(err) = downstream.reply(StatusCode::RequestTerminated).await {
+                        warn!(error = %err, "failed to send 487 to downstream INVITE");
+                    }
+                }
+
+                context.pending.write().await.remove(&call_id);
+                context.media.release(&pending_invite.media_key).await;
+                Ok(())
             }
         }
-
-        context.pending.write().await.remove(&call_id);
-        if let Err(err) = self.send_upstream_cancel(&pending_invite).await {
-            warn!(error = %err, "failed to send CANCEL upstream");
-        }
-
-        context.media.release(&pending_invite.media_key).await;
-
-        Ok(())
     }
 
     async fn send_upstream_cancel(&self, pending: &PendingInvite) -> Result<()> {
