@@ -659,6 +659,10 @@ impl RsipstackBackend {
             }
             Err(err) => {
                 warn!(error = %err, "invite forwarding task failed");
+                let mut guard = pending.downstream_tx.lock().await;
+                if let Err(reply_err) = guard.reply(StatusCode::ServerInternalError).await {
+                    warn!(error = %reply_err, "failed to notify downstream about INVITE failure");
+                }
                 context.media.release(&pending.media_key).await;
             }
         }
