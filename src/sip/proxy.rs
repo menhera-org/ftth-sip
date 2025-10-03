@@ -427,6 +427,7 @@ impl RsipstackBackend {
 
         match tx.original.method {
             Method::Register => self.handle_register(context, &mut tx, direction).await,
+            Method::Options => self.handle_options(context, &mut tx, direction).await,
             _ => {
                 tx.reply(StatusCode::NotImplemented)
                     .await
@@ -530,6 +531,37 @@ impl RsipstackBackend {
 
         tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
         Ok(())
+    }
+
+    async fn handle_options(
+        &self,
+        context: SipContext,
+        tx: &mut Transaction,
+        direction: TransactionDirection,
+    ) -> Result<()> {
+        // Respond to OPTIONS locally to provide capability and health info.
+        let mut headers = Vec::new();
+        headers.push(rsip::Header::Other(
+            "Allow".into(),
+            "INVITE, ACK, CANCEL, BYE, REGISTER, OPTIONS".into(),
+        ));
+        headers.push(rsip::Header::Other(
+            "Accept".into(),
+            "application/sdp".into(),
+        ));
+
+        if direction == TransactionDirection::Downstream {
+            if let Some(registration) = context.registrations.read().await.get() {
+                headers.push(rsip::Header::Other(
+                    "Contact".into(),
+                    registration.contact_uri.clone(),
+                ));
+            }
+        }
+
+        tx.reply_with(StatusCode::OK, headers, None)
+            .await
+            .map_err(Error::sip_stack)
     }
 }
 
