@@ -1251,17 +1251,14 @@ impl RsipstackBackend {
         }
     }
 
-    fn strip_own_via(headers: &mut rsip::Headers) {
-        use std::mem;
-
-        let mut collected: Vec<rsip::Header> = mem::take(headers).into();
-        if let Some(index) = collected
-            .iter()
-            .position(|header| matches!(header, rsip::Header::Via(_)))
-        {
-            collected.remove(index);
+    fn replace_top_via(headers: &mut rsip::Headers, via: rsip::headers::Via) {
+        for header in headers.iter_mut() {
+            if matches!(header, rsip::Header::Via(_)) {
+                *header = rsip::Header::Via(via);
+                return;
+            }
         }
-        *headers = collected.into();
+        headers.push(rsip::Header::Via(via));
     }
 
     async fn forward_upstream_responses(
@@ -1283,7 +1280,15 @@ impl RsipstackBackend {
                     match maybe_message {
                         Some(SipMessage::Response(mut upstream_response)) => {
                             Self::expand_compact_headers(&mut upstream_response.headers);
-                            Self::strip_own_via(&mut upstream_response.headers);
+                            let downstream_via = {
+                                let guard = downstream_tx.lock().await;
+                                guard
+                                    .original
+                                    .via_header()
+                                    .map_err(Error::sip_stack)?
+                                    .clone()
+                            };
+                            Self::replace_top_via(&mut upstream_response.headers, downstream_via);
                             if !upstream_response.body.is_empty() {
                                 if let Ok(body) = String::from_utf8(upstream_response.body.clone()) {
                                     let rewrite = media_session.rewrite_for_downstream(&body)?;
@@ -1351,7 +1356,15 @@ impl RsipstackBackend {
                     match maybe_message {
                         Some(SipMessage::Response(mut downstream_response)) => {
                             Self::expand_compact_headers(&mut downstream_response.headers);
-                            Self::strip_own_via(&mut downstream_response.headers);
+                            let upstream_via = {
+                                let guard = upstream_tx.lock().await;
+                                guard
+                                    .original
+                                    .via_header()
+                                    .map_err(Error::sip_stack)?
+                                    .clone()
+                            };
+                            Self::replace_top_via(&mut downstream_response.headers, upstream_via);
                             if !downstream_response.body.is_empty() {
                                 if let Ok(body) = String::from_utf8(downstream_response.body.clone()) {
                                     let rewrite = media_session.rewrite_for_upstream(&body)?;
