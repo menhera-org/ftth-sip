@@ -1266,6 +1266,162 @@ impl RsipstackBackend {
         .map_err(Error::sip_stack)
     }
 
+    async fn ensure_downstream_authorized(
+        &self,
+        context: &SipContext,
+        tx: &mut Transaction,
+        realm: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<bool> {
+        if username.is_empty() {
+            let proxy_auth =
+                match tx
+                    .original
+                    .headers
+                    .clone()
+                    .into_iter()
+                    .find_map(|header| match header {
+                        rsip::Header::ProxyAuthorization(value) => Some(value),
+                        _ => None,
+                    }) {
+                    Some(header) => header.typed().map_err(Error::sip_stack)?.0.clone(),
+                    None => {
+                        self.challenge_downstream_proxy(context, tx, realm, false)
+                            .await?;
+                        return Ok(false);
+                    }
+                };
+
+            self.verify_digest(context, tx, realm, None, password, proxy_auth, true)
+                .await
+        } else {
+            let auth = match tx
+                .original
+                .headers
+                .clone()
+                .into_iter()
+                .find_map(|header| match header {
+                    rsip::Header::Authorization(value) => Some(value),
+                    _ => None,
+                }) {
+                Some(header) => header.typed().map_err(Error::sip_stack)?,
+                None => {
+                    self.challenge_downstream_register(context, tx, realm, false)
+                        .await?;
+                    return Ok(false);
+                }
+            };
+
+            if !auth.username.eq_ignore_ascii_case(username) {
+                self.challenge_downstream_register(context, tx, realm, false)
+                    .await?;
+                return Ok(false);
+            }
+
+            self.verify_digest(context, tx, realm, Some(username), password, auth, false)
+                .await
+        }
+    }
+
+    async fn verify_digest(
+        &self,
+        context: &SipContext,
+        tx: &mut Transaction,
+        realm: &str,
+        username: Option<&str>,
+        password: &str,
+        auth: rsip::typed::Authorization,
+        proxy: bool,
+    ) -> Result<bool> {
+        if auth.scheme != auth::Scheme::Digest {
+            if proxy {
+                self.challenge_downstream_proxy(context, tx, realm, false)
+                    .await?;
+            } else {
+                self.challenge_downstream_register(context, tx, realm, false)
+                    .await?;
+            }
+            return Ok(false);
+        }
+
+        if auth.realm != realm {
+            if proxy {
+                self.challenge_downstream_proxy(context, tx, realm, false)
+                    .await?;
+            } else {
+                self.challenge_downstream_register(context, tx, realm, false)
+                    .await?;
+            }
+            return Ok(false);
+        }
+
+        if let Some(user) = username {
+            if !auth.username.eq_ignore_ascii_case(user) {
+                self.challenge_downstream_register(context, tx, realm, false)
+                    .await?;
+                return Ok(false);
+            }
+        }
+
+        if let Some(algorithm) = auth.algorithm {
+            if algorithm != auth::Algorithm::Md5 {
+                if proxy {
+                    self.challenge_downstream_proxy(context, tx, realm, false)
+                        .await?;
+                } else {
+                    self.challenge_downstream_register(context, tx, realm, false)
+                        .await?;
+                }
+                return Ok(false);
+            }
+        }
+
+        if !context.auth.is_valid(&auth.nonce).await {
+            if proxy {
+                self.challenge_downstream_proxy(context, tx, realm, true)
+                    .await?;
+            } else {
+                self.challenge_downstream_register(context, tx, realm, true)
+                    .await?;
+            }
+            return Ok(false);
+        }
+
+        let expected_response =
+            match Self::compute_authorization_response(&auth, &tx.original, password, realm) {
+                Ok(value) => value,
+                Err(err) => {
+                    warn!(error = %err, "failed to compute digest response");
+                    context.auth.invalidate(&auth.nonce).await;
+                    if proxy {
+                        self.challenge_downstream_proxy(context, tx, realm, true)
+                            .await?;
+                    } else {
+                        self.challenge_downstream_register(context, tx, realm, true)
+                            .await?;
+                    }
+                    return Ok(false);
+                }
+            };
+
+        let provided = auth.response.to_ascii_lowercase();
+        if !constant_time_eq(expected_response.as_bytes(), provided.as_bytes()) {
+            context.auth.invalidate(&auth.nonce).await;
+            if proxy {
+                self.challenge_downstream_proxy(context, tx, realm, true)
+                    .await?;
+            } else {
+                self.challenge_downstream_register(context, tx, realm, true)
+                    .await?;
+            }
+            return Ok(false);
+        }
+
+        context.auth.invalidate(&auth.nonce).await;
+        Ok(true)
+    }
+
     async fn ensure_downstream_proxy_authorized(
         &self,
         context: &SipContext,
@@ -1273,71 +1429,8 @@ impl RsipstackBackend {
         realm: &str,
         password: &str,
     ) -> Result<bool> {
-        let proxy_auth = tx.original.headers.iter().find_map(|header| match header {
-            rsip::Header::ProxyAuthorization(value) => Some(value.clone()),
-            _ => None,
-        });
-
-        let Some(proxy_auth) = proxy_auth else {
-            self.challenge_downstream_proxy(context, tx, realm, false)
-                .await?;
-            return Ok(false);
-        };
-
-        let proxy_auth = proxy_auth.typed().map_err(Error::sip_stack)?.0;
-
-        if proxy_auth.scheme != auth::Scheme::Digest {
-            self.challenge_downstream_proxy(context, tx, realm, false)
-                .await?;
-            return Ok(false);
-        }
-
-        if proxy_auth.realm != realm {
-            self.challenge_downstream_proxy(context, tx, realm, false)
-                .await?;
-            return Ok(false);
-        }
-
-        if let Some(algorithm) = proxy_auth.algorithm {
-            if algorithm != auth::Algorithm::Md5 {
-                self.challenge_downstream_proxy(context, tx, realm, false)
-                    .await?;
-                return Ok(false);
-            }
-        }
-
-        if !context.auth.is_valid(&proxy_auth.nonce).await {
-            self.challenge_downstream_proxy(context, tx, realm, true)
-                .await?;
-            return Ok(false);
-        }
-
-        let expected_response = match Self::compute_authorization_response(
-            &proxy_auth,
-            &tx.original,
-            password,
-            realm,
-        ) {
-            Ok(value) => value,
-            Err(err) => {
-                warn!(error = %err, "failed to compute expected proxy digest");
-                context.auth.invalidate(&proxy_auth.nonce).await;
-                self.challenge_downstream_proxy(context, tx, realm, true)
-                    .await?;
-                return Ok(false);
-            }
-        };
-
-        let provided = proxy_auth.response.to_ascii_lowercase();
-        if !constant_time_eq(expected_response.as_bytes(), provided.as_bytes()) {
-            context.auth.invalidate(&proxy_auth.nonce).await;
-            self.challenge_downstream_proxy(context, tx, realm, true)
-                .await?;
-            return Ok(false);
-        }
-
-        context.auth.invalidate(&proxy_auth.nonce).await;
-        Ok(true)
+        self.ensure_downstream_authorized(context, tx, realm, "", password)
+            .await
     }
 
     async fn challenge_downstream_proxy(
@@ -2117,78 +2210,18 @@ impl RsipstackBackend {
             return Ok(());
         }
 
-        let authorization = tx
-            .original
-            .authorization_header()
-            .cloned()
-            .and_then(|header| header.typed().ok());
-
-        let Some(authorization) = authorization else {
-            self.challenge_downstream_register(&context, tx, &realm, false)
-                .await?;
-            return Ok(());
-        };
-
-        if authorization.scheme != auth::Scheme::Digest {
-            self.challenge_downstream_register(&context, tx, &realm, false)
-                .await?;
+        let authenticated = self
+            .ensure_downstream_authorized(
+                &context,
+                tx,
+                &realm,
+                &allowed.username,
+                &allowed.password,
+            )
+            .await?;
+        if !authenticated {
             return Ok(());
         }
-
-        if !authorization
-            .username
-            .eq_ignore_ascii_case(&allowed.username)
-        {
-            self.challenge_downstream_register(&context, tx, &realm, false)
-                .await?;
-            return Ok(());
-        }
-
-        if authorization.realm != realm {
-            self.challenge_downstream_register(&context, tx, &realm, false)
-                .await?;
-            return Ok(());
-        }
-
-        if let Some(algorithm) = authorization.algorithm {
-            if algorithm != auth::Algorithm::Md5 {
-                self.challenge_downstream_register(&context, tx, &realm, false)
-                    .await?;
-                return Ok(());
-            }
-        }
-
-        if !context.auth.is_valid(&authorization.nonce).await {
-            self.challenge_downstream_register(&context, tx, &realm, true)
-                .await?;
-            return Ok(());
-        }
-
-        let expected_response = match Self::compute_authorization_response(
-            &authorization,
-            &tx.original,
-            &allowed.password,
-            &realm,
-        ) {
-            Ok(value) => value,
-            Err(err) => {
-                warn!(error = %err, "failed to compute expected digest for downstream REGISTER");
-                context.auth.invalidate(&authorization.nonce).await;
-                self.challenge_downstream_register(&context, tx, &realm, true)
-                    .await?;
-                return Ok(());
-            }
-        };
-
-        let provided = authorization.response.to_ascii_lowercase();
-        if !constant_time_eq(expected_response.as_bytes(), provided.as_bytes()) {
-            context.auth.invalidate(&authorization.nonce).await;
-            self.challenge_downstream_register(&context, tx, &realm, true)
-                .await?;
-            return Ok(());
-        }
-
-        context.auth.invalidate(&authorization.nonce).await;
 
         let default_expires = context.config.timers.registration_refresh_secs;
         let expires_secs = match tx.original.expires_header() {
