@@ -302,6 +302,16 @@ impl RsipstackBackend {
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
 
+        let downstream_preferred_identity =
+            original.headers.iter().find_map(|header| match header {
+                rsip::Header::Other(name, value)
+                    if name.eq_ignore_ascii_case("P-Preferred-Identity") =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            });
+
         if let Some(body) = body_override {
             request.body = body;
         }
@@ -415,27 +425,70 @@ impl RsipstackBackend {
             .headers
             .unique_push(rsip::Header::Contact(contact_header));
 
-        let asserted = format!("<{}>", identity_uri_string);
-        request.headers.unique_push(rsip::Header::Other(
-            "P-Preferred-Identity".into(),
-            asserted.clone(),
-        ));
-        request
-            .headers
-            .unique_push(rsip::Header::Other("P-Asserted-Identity".into(), asserted));
+        if request.method == Method::Invite {
+            let p_preferred = downstream_preferred_identity
+                .map(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        format!("<{}>", identity_uri_string)
+                    } else if trimmed.starts_with('<') {
+                        trimmed.to_string()
+                    } else if trimmed.starts_with("sip:") || trimmed.starts_with("tel:") {
+                        format!("<{}>", trimmed)
+                    } else if trimmed.contains('@') {
+                        format!("<sip:{}>", trimmed)
+                    } else {
+                        format!("<sip:{}@{}>", trimmed, upstream_config.sip_domain)
+                    }
+                })
+                .unwrap_or_else(|| format!("<{}>", identity_uri_string));
 
-        if !route_set.is_empty() {
-            let route_value = UriWithParamsList::from(route_set.to_vec()).to_string();
+            request.headers.unique_push(rsip::Header::Other(
+                "P-Preferred-Identity".into(),
+                p_preferred.clone(),
+            ));
+            request.headers.unique_push(rsip::Header::Other(
+                "P-Asserted-Identity".into(),
+                p_preferred,
+            ));
+
+            if !route_set.is_empty() {
+                let route_value = UriWithParamsList::from(route_set.to_vec()).to_string();
+                request
+                    .headers
+                    .unique_push(rsip::Header::Route(rsip::headers::Route::from(route_value)));
+            }
+
+            request.headers.unique_push(rsip::Header::MaxForwards(
+                rsip::headers::MaxForwards::from(70u32),
+            ));
+
             request
                 .headers
-                .unique_push(rsip::Header::Route(rsip::headers::Route::from(route_value)));
-        }
+                .retain(|header| !matches!(header, rsip::Header::Supported(_)));
+            request
+                .headers
+                .unique_push(rsip::Header::Supported(Supported::new(
+                    "100rel, timer".to_string(),
+                )));
+            request.headers.retain(|header| {
+                !matches!(header, rsip::Header::Other(name, _) if name.eq_ignore_ascii_case("Session-Expires"))
+            });
+            request
+                .headers
+                .unique_push(rsip::Header::Other("Session-Expires".into(), "300".into()));
+        } else {
+            if !route_set.is_empty() {
+                let route_value = UriWithParamsList::from(route_set.to_vec()).to_string();
+                request
+                    .headers
+                    .unique_push(rsip::Header::Route(rsip::headers::Route::from(route_value)));
+            }
 
-        request
-            .headers
-            .unique_push(rsip::Header::MaxForwards(rsip::headers::MaxForwards::from(
-                70u32,
-            )));
+            request.headers.unique_push(rsip::Header::MaxForwards(
+                rsip::headers::MaxForwards::from(70u32),
+            ));
+        }
 
         Ok(request)
     }
