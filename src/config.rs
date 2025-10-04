@@ -49,6 +49,8 @@ pub struct UpstreamAuth {
 pub struct DownstreamConfig {
     pub bind: BindConfig,
     pub user_agent: AllowedUserAgent,
+    /// Optional default SIP user part to use when routing inbound requests to the LAN PBX.
+    pub default_user: Option<String>,
     pub transport: TransportProfile,
 }
 

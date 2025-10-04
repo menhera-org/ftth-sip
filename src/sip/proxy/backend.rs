@@ -12,7 +12,7 @@ use ftth_rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use ftth_rsipstack::transaction::transaction::Transaction;
 use ftth_rsipstack::transport::udp::{UdpConnection, UdpInner};
 use ftth_rsipstack::transport::{SipAddr, SipConnection, TransportLayer};
-use rsip::common::uri::{UriWithParams, UriWithParamsList, param::Tag};
+use rsip::common::uri::{UriWithParams, UriWithParamsList, auth::Auth as UriAuth, param::Tag};
 use rsip::headers::auth::{self, AuthQop, Qop};
 use rsip::headers::{
     CallId as HeaderCallId, Contact, ContentEncoding, ContentLength as HeaderContentLength,
@@ -789,6 +789,7 @@ impl RsipstackBackend {
         original: &rsip::Request,
         body_override: Option<Vec<u8>>,
         strip_user: bool,
+        default_user: Option<&str>,
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
 
@@ -818,7 +819,9 @@ impl RsipstackBackend {
             uri
         };
         if strip_user {
-            target_uri.auth = None;
+            if let Some(user) = default_user {
+                target_uri.auth = Some(UriAuth::from((user, Option::<String>::None)));
+            }
         }
         request.uri = target_uri;
 
@@ -1107,6 +1110,7 @@ impl RsipstackBackend {
                         .clone()
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
+                let default_user = context.config.downstream.default_user.as_deref();
 
                 let downstream_request = Self::prepare_downstream_request(
                     &endpoint,
@@ -1115,6 +1119,7 @@ impl RsipstackBackend {
                     &tx.original,
                     body_override,
                     false,
+                    default_user,
                 )?;
 
                 let mut client_tx = self
@@ -2007,6 +2012,7 @@ impl RsipstackBackend {
                         .clone()
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
+                let default_user = context.config.downstream.default_user.as_deref();
 
                 let config = context.config.as_ref();
                 let identity = if config.upstream.default_identity.is_empty() {
@@ -2037,6 +2043,7 @@ impl RsipstackBackend {
                     &original_request,
                     rewritten_body,
                     true,
+                    default_user,
                 )?;
 
                 let downstream_request_clone = downstream_request.clone();
@@ -2174,6 +2181,7 @@ impl RsipstackBackend {
                         .clone()
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
+                let default_user = context.config.downstream.default_user.as_deref();
 
                 let downstream_request = Self::prepare_downstream_request(
                     &endpoint,
@@ -2182,6 +2190,7 @@ impl RsipstackBackend {
                     &tx.original,
                     None,
                     false,
+                    default_user,
                 )?;
 
                 let _ = self
@@ -2421,6 +2430,7 @@ impl RsipstackBackend {
                         .clone()
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
+                let default_user = context.config.downstream.default_user.as_deref();
 
                 let downstream_request = Self::prepare_downstream_request(
                     &endpoint,
@@ -2429,6 +2439,7 @@ impl RsipstackBackend {
                     &tx.original,
                     body_override,
                     false,
+                    default_user,
                 )?;
 
                 let mut client_tx = self

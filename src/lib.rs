@@ -57,6 +57,7 @@ mod tests {
                     realm: Some("asterisk.local".into()),
                     password: Some("secret".into()),
                 },
+                default_user: Some("s".into()),
                 transport: TransportProfile::Udp,
             },
             media: MediaConfig {

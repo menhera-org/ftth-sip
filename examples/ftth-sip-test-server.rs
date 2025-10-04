@@ -86,6 +86,10 @@ struct Cli {
     #[arg(long)]
     downstream_realm: Option<String>,
 
+    /// Optional default user part to use for inbound INVITEs toward the downstream PBX
+    #[arg(long)]
+    downstream_default_user: Option<String>,
+
     /// Media relay upstream bind address (defaults to upstream bind address)
     #[arg(long)]
     media_upstream_addr: Option<IpAddr>,
@@ -215,6 +219,7 @@ impl Cli {
                 realm: self.downstream_realm,
                 password: self.downstream_password.clone(),
             },
+            default_user: self.downstream_default_user.clone(),
             transport: TransportProfile::Udp,
         };
 
