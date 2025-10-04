@@ -29,7 +29,9 @@ use ftth_rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use ftth_rsipstack::transaction::transaction::Transaction;
 use rsip::common::uri::param::Tag;
 use rsip::headers::auth::{self, AuthQop, Qop};
-use rsip::headers::{Contact, ToTypedHeader, UntypedHeader};
+use rsip::headers::{
+    CallId as HeaderCallId, Contact, ContentEncoding, ContentLength as HeaderContentLength, ContentType, From as HeaderFrom, Subject, Supported, To as HeaderTo, ToTypedHeader, UntypedHeader, Via as HeaderVia
+};
 use rsip::message::headers_ext::HeadersExt;
 use rsip::typed;
 use rsip::{
@@ -609,7 +611,8 @@ impl UpstreamRegistrar {
                 .await?;
 
             while let Some(message) = tx.receive().await {
-                if let SipMessage::Response(response) = message {
+                if let SipMessage::Response(mut response) = message {
+                    RsipstackBackend::expand_compact_headers(&mut response.headers);
                     debug!(status = %response.status_code, "received upstream REGISTER response");
                     match response.status_code {
                         StatusCode::OK => {
@@ -1464,6 +1467,38 @@ impl RsipstackBackend {
         Ok(true)
     }
 
+    fn expand_compact_headers(headers: &mut rsip::Headers) {
+        use std::mem;
+
+        let mut collected: Vec<rsip::Header> = mem::take(headers).into();
+        for header in collected.iter_mut() {
+            if let rsip::Header::Other(name, value) = header {
+                if let Some(expanded) = Self::expand_compact_header(name, value) {
+                    *header = expanded;
+                }
+            }
+        }
+        *headers = collected.into();
+    }
+
+    fn expand_compact_header(name: &str, value: &str) -> Option<rsip::Header> {
+        match name.to_ascii_lowercase().as_str() {
+            "f" => Some(rsip::Header::From(HeaderFrom::new(value.to_string()))),
+            "t" => Some(rsip::Header::To(HeaderTo::new(value.to_string()))),
+            "i" => Some(rsip::Header::CallId(HeaderCallId::new(value.to_string()))),
+            "m" => Some(rsip::Header::Contact(Contact::new(value.to_string()))),
+            "v" => Some(rsip::Header::Via(HeaderVia::new(value.to_string()))),
+            "l" => Some(rsip::Header::ContentLength(HeaderContentLength::new(
+                value.to_string(),
+            ))),
+            "c" => Some(rsip::Header::ContentType(ContentType::new(value.to_string()))),
+            "e" => Some(rsip::Header::ContentEncoding(ContentEncoding::new(value.to_string()))),
+            "k" => Some(rsip::Header::Supported(Supported::new(value.to_string()))),
+            "s" => Some(rsip::Header::Subject(Subject::new(value.to_string()))),
+            _ => None,
+        }
+    }
+
     async fn ensure_downstream_proxy_authorized(
         &self,
         context: &SipContext,
@@ -1701,6 +1736,7 @@ impl RsipstackBackend {
                 while let Some(message) = client_tx.receive().await {
                     match message {
                         SipMessage::Response(mut response) => {
+                            Self::expand_compact_headers(&mut response.headers);
                             let status = response.status_code.clone();
 
                             if !response.body.is_empty() {
@@ -1811,6 +1847,7 @@ impl RsipstackBackend {
                 while let Some(message) = client_tx.receive().await {
                     match message {
                         SipMessage::Response(mut response) => {
+                            Self::expand_compact_headers(&mut response.headers);
                             let status = response.status_code.clone();
 
                             if !response.body.is_empty() {
@@ -1890,6 +1927,7 @@ impl RsipstackBackend {
                 maybe_message = client_tx.receive() => {
                     match maybe_message {
                         Some(SipMessage::Response(mut upstream_response)) => {
+                            Self::expand_compact_headers(&mut upstream_response.headers);
                             if !upstream_response.body.is_empty() {
                                 if let Ok(body) = String::from_utf8(upstream_response.body.clone()) {
                                     let rewrite = media_session.rewrite_for_downstream(&body)?;
@@ -1956,6 +1994,7 @@ impl RsipstackBackend {
                 maybe_message = client_tx.receive() => {
                     match maybe_message {
                         Some(SipMessage::Response(mut downstream_response)) => {
+                            Self::expand_compact_headers(&mut downstream_response.headers);
                             if !downstream_response.body.is_empty() {
                                 if let Ok(body) = String::from_utf8(downstream_response.body.clone()) {
                                     let rewrite = media_session.rewrite_for_upstream(&body)?;
@@ -2207,6 +2246,8 @@ impl RsipstackBackend {
         upstream_listener: SocketAddr,
     ) -> Result<()> {
         let direction = self.determine_direction(&tx, downstream_listener, upstream_listener)?;
+
+        Self::expand_compact_headers(&mut tx.original.headers);
 
         match tx.original.method.clone() {
             Method::Invite => self.handle_invite(context, tx, direction).await,
@@ -2958,7 +2999,8 @@ impl RsipstackBackend {
                 let mut responded = false;
                 while let Some(message) = client_tx.receive().await {
                     match message {
-                        SipMessage::Response(response) => {
+                        SipMessage::Response(mut response) => {
+                            Self::expand_compact_headers(&mut response.headers);
                             let status = response.status_code.clone();
                             tx.respond(response).await.map_err(Error::sip_stack)?;
                             responded = true;
@@ -3042,6 +3084,7 @@ impl RsipstackBackend {
                 while let Some(message) = client_tx.receive().await {
                     match message {
                         SipMessage::Response(mut response) => {
+                            Self::expand_compact_headers(&mut response.headers);
                             let status = response.status_code.clone();
 
                             if !response.body.is_empty() {
