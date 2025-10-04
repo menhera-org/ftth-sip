@@ -1593,46 +1593,52 @@ impl RsipstackBackend {
             return;
         };
 
-        match (pending_entry, result) {
-            (PendingInvite::Outbound(pending), Ok((Some(status), Some(response))))
-                if matches!(status.kind(), StatusCodeKind::Successful) =>
-            {
-                let upstream_contact_uri = response
-                    .contact_header()
-                    .ok()
-                    .and_then(|header| header.typed().ok().map(|typed| typed.uri));
-                let upstream_to_tag = response
-                    .to_header()
-                    .ok()
-                    .and_then(|to| to.tag().ok().flatten().map(|tag| tag.to_string()));
+        match pending_entry {
+            PendingInvite::Outbound(pending) => {
+                pending.cancel_token.cancel();
+                match result {
+                    Ok((Some(status), Some(response)))
+                        if matches!(status.kind(), StatusCodeKind::Successful) =>
+                    {
+                        let upstream_contact_uri = response
+                            .contact_header()
+                            .ok()
+                            .and_then(|header| header.typed().ok().map(|typed| typed.uri));
+                        let upstream_to_tag = response
+                            .to_header()
+                            .ok()
+                            .and_then(|to| to.tag().ok().flatten().map(|tag| tag.to_string()));
 
-                context.calls.write().await.insert(
-                    call_id,
-                    CallContext {
-                        media: pending.media,
-                        media_key: pending.media_key,
-                        upstream_target: pending.upstream_target,
-                        upstream_contact: upstream_contact_uri,
-                        downstream_contact: pending.downstream_contact,
-                        upstream_to_tag,
-                        downstream_target: pending.downstream_target,
-                        identity: pending.identity,
-                    },
-                );
-            }
-            (PendingInvite::Outbound(pending), Ok(_)) => {
-                context.media.release(&pending.media_key).await;
-            }
-            (PendingInvite::Outbound(pending), Err(err)) => {
-                warn!(error = %err, "invite forwarding task failed");
-                let mut guard = pending.downstream_tx.lock().await;
-                if let Err(reply_err) = guard.reply(StatusCode::ServerInternalError).await {
-                    warn!(error = %reply_err, "failed to notify downstream about INVITE failure");
+                        context.calls.write().await.insert(
+                            call_id,
+                            CallContext {
+                                media: pending.media,
+                                media_key: pending.media_key,
+                                upstream_target: pending.upstream_target,
+                                upstream_contact: upstream_contact_uri,
+                                downstream_contact: pending.downstream_contact,
+                                upstream_to_tag,
+                                downstream_target: pending.downstream_target,
+                                identity: pending.identity,
+                            },
+                        );
+                    }
+                    Ok(_) => {
+                        context.media.release(&pending.media_key).await;
+                    }
+                    Err(err) => {
+                        warn!(error = %err, "invite forwarding task failed");
+                        let mut guard = pending.downstream_tx.lock().await;
+                        if let Err(reply_err) = guard.reply(StatusCode::ServerInternalError).await {
+                            warn!(error = %reply_err, "failed to notify downstream about INVITE failure");
+                        }
+                        context.media.release(&pending.media_key).await;
+                    }
                 }
-                context.media.release(&pending.media_key).await;
             }
-            (PendingInvite::Inbound(pending), outcome) => {
-                debug!(outcome = ?outcome, "unexpected outbound INVITE finalization for inbound pending state");
+            PendingInvite::Inbound(pending) => {
+                pending.cancel_token.cancel();
+                debug!("outbound finalize encountered inbound pending invite; releasing resources");
                 context.media.release(&pending.media_key).await;
             }
         }
@@ -1702,6 +1708,68 @@ impl RsipstackBackend {
                 if let Err(reply_err) = guard.reply(StatusCode::ServerInternalError).await {
                     warn!(error = %reply_err, "failed to notify upstream about INVITE failure");
                 }
+                context.media.release(&pending.media_key).await;
+            }
+        }
+    }
+
+    fn schedule_invite_timeout(
+        &self,
+        context: SipContext,
+        call_id: String,
+        cancel_token: CancellationToken,
+    ) {
+        let timeout_secs = context.config.timers.invite_timeout_secs;
+        if timeout_secs == 0 {
+            return;
+        }
+
+        let backend = self.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {}
+                _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
+                    backend.handle_invite_timeout(context, call_id).await;
+                }
+            }
+        });
+    }
+
+    async fn handle_invite_timeout(&self, context: SipContext, call_id: String) {
+        let pending_entry = context.pending.write().await.remove(&call_id);
+        let Some(pending_entry) = pending_entry else {
+            return;
+        };
+
+        match pending_entry {
+            PendingInvite::Outbound(pending) => {
+                pending.cancel_token.cancel();
+                {
+                    let mut downstream = pending.downstream_tx.lock().await;
+                    if let Err(err) = downstream.reply(StatusCode::RequestTimeout).await {
+                        warn!(error = %err, "failed to notify downstream about INVITE timeout");
+                    }
+                }
+
+                if let Err(err) = self.send_upstream_cancel(&pending).await {
+                    warn!(error = %err, "failed to cancel upstream after INVITE timeout");
+                }
+
+                context.media.release(&pending.media_key).await;
+            }
+            PendingInvite::Inbound(pending) => {
+                pending.cancel_token.cancel();
+                {
+                    let mut upstream = pending.upstream_tx.lock().await;
+                    if let Err(err) = upstream.reply(StatusCode::RequestTimeout).await {
+                        warn!(error = %err, "failed to notify upstream about INVITE timeout");
+                    }
+                }
+
+                if let Err(err) = self.send_downstream_cancel(&pending).await {
+                    warn!(error = %err, "failed to cancel downstream after INVITE timeout");
+                }
+
                 context.media.release(&pending.media_key).await;
             }
         }
@@ -2007,12 +2075,18 @@ impl RsipstackBackend {
                         media_key,
                         upstream_target: target,
                         downstream_contact: downstream_contact_uri,
-                        cancel_token,
+                        cancel_token: cancel_token.clone(),
                         endpoint,
                         upstream_request: upstream_request_clone,
                         downstream_target: downstream_target.clone(),
                         identity: identity.clone(),
                     }),
+                );
+
+                self.schedule_invite_timeout(
+                    context.clone(),
+                    call_id.clone(),
+                    cancel_token.clone(),
                 );
 
                 tokio::spawn(async move {
@@ -2143,7 +2217,6 @@ impl RsipstackBackend {
                     .await?;
 
                 let cancel_token = CancellationToken::new();
-
                 context.pending.write().await.insert(
                     call_id.clone(),
                     PendingInvite::Inbound(InboundPendingInvite {
@@ -2158,6 +2231,12 @@ impl RsipstackBackend {
                         identity,
                         upstream_request: original_request,
                     }),
+                );
+
+                self.schedule_invite_timeout(
+                    context.clone(),
+                    call_id.clone(),
+                    cancel_token.clone(),
                 );
 
                 let backend = self.clone();
