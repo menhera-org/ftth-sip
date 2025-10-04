@@ -1133,6 +1133,11 @@ impl RsipstackBackend {
             rsip::headers::ContentLength::from(content_length),
         ));
 
+        let original_from = original
+            .from_header()
+            .ok()
+            .and_then(|header| header.typed().ok());
+
         request
             .headers
             .retain(|header| !matches!(header, rsip::Header::Via(_)));
@@ -1182,25 +1187,22 @@ impl RsipstackBackend {
         let identity_uri_string = format!("sip:{}@{}", identity, upstream_config.sip_domain);
         let identity_uri = Uri::try_from(identity_uri_string.as_str()).map_err(Error::sip_stack)?;
 
-        if let Ok(from_header) = request
-            .from_header()
-            .map(|h| h.clone())
-            .map_err(Error::sip_stack)
+        let mut typed_from = original_from.unwrap_or_else(|| typed::From {
+            display_name: None,
+            uri: identity_uri.clone(),
+            params: Vec::new(),
+        });
+        typed_from.uri = identity_uri.clone();
+        if !typed_from
+            .params
+            .iter()
+            .any(|param| matches!(param, Param::Tag(_)))
         {
-            if let Ok(mut typed_from) = from_header.typed() {
-                typed_from.uri = identity_uri.clone();
-                request
-                    .headers
-                    .unique_push(rsip::Header::From(typed_from.into()));
-            }
-        } else {
-            let from = typed::From {
-                display_name: None,
-                uri: identity_uri.clone(),
-                params: vec![],
-            };
-            request.headers.unique_push(rsip::Header::From(from.into()));
+            typed_from.params.push(Param::Tag(Tag::default()));
         }
+        request
+            .headers
+            .unique_push(rsip::Header::From(typed_from.into()));
 
         let contact_ip = if upstream_config.bind.address.is_unspecified() {
             via_ip
