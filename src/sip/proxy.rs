@@ -948,6 +948,16 @@ fn format_socket_for_sip(addr: &SocketAddr) -> String {
     }
 }
 
+fn downstream_realm(context: &SipContext) -> String {
+    context
+        .config
+        .downstream
+        .user_agent
+        .realm
+        .clone()
+        .unwrap_or_else(|| context.config.upstream.sip_domain.clone())
+}
+
 fn md5_hex(bytes: &[u8]) -> String {
     format!("{:032x}", md5::compute(bytes))
 }
@@ -1256,6 +1266,109 @@ impl RsipstackBackend {
         .map_err(Error::sip_stack)
     }
 
+    async fn ensure_downstream_proxy_authorized(
+        &self,
+        context: &SipContext,
+        tx: &mut Transaction,
+        realm: &str,
+        password: &str,
+    ) -> Result<bool> {
+        let proxy_auth = tx.original.headers.iter().find_map(|header| match header {
+            rsip::Header::ProxyAuthorization(value) => Some(value.clone()),
+            _ => None,
+        });
+
+        let Some(proxy_auth) = proxy_auth else {
+            self.challenge_downstream_proxy(context, tx, realm, false)
+                .await?;
+            return Ok(false);
+        };
+
+        let proxy_auth = proxy_auth.typed().map_err(Error::sip_stack)?.0;
+
+        if proxy_auth.scheme != auth::Scheme::Digest {
+            self.challenge_downstream_proxy(context, tx, realm, false)
+                .await?;
+            return Ok(false);
+        }
+
+        if proxy_auth.realm != realm {
+            self.challenge_downstream_proxy(context, tx, realm, false)
+                .await?;
+            return Ok(false);
+        }
+
+        if let Some(algorithm) = proxy_auth.algorithm {
+            if algorithm != auth::Algorithm::Md5 {
+                self.challenge_downstream_proxy(context, tx, realm, false)
+                    .await?;
+                return Ok(false);
+            }
+        }
+
+        if !context.auth.is_valid(&proxy_auth.nonce).await {
+            self.challenge_downstream_proxy(context, tx, realm, true)
+                .await?;
+            return Ok(false);
+        }
+
+        let expected_response = match Self::compute_authorization_response(
+            &proxy_auth,
+            &tx.original,
+            password,
+            realm,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                warn!(error = %err, "failed to compute expected proxy digest");
+                context.auth.invalidate(&proxy_auth.nonce).await;
+                self.challenge_downstream_proxy(context, tx, realm, true)
+                    .await?;
+                return Ok(false);
+            }
+        };
+
+        let provided = proxy_auth.response.to_ascii_lowercase();
+        if !constant_time_eq(expected_response.as_bytes(), provided.as_bytes()) {
+            context.auth.invalidate(&proxy_auth.nonce).await;
+            self.challenge_downstream_proxy(context, tx, realm, true)
+                .await?;
+            return Ok(false);
+        }
+
+        context.auth.invalidate(&proxy_auth.nonce).await;
+        Ok(true)
+    }
+
+    async fn challenge_downstream_proxy(
+        &self,
+        context: &SipContext,
+        tx: &mut Transaction,
+        realm: &str,
+        stale: bool,
+    ) -> Result<()> {
+        let nonce = context.auth.issue_nonce().await;
+        let challenge = rsip::typed::ProxyAuthenticate(rsip::typed::WwwAuthenticate {
+            scheme: auth::Scheme::Digest,
+            realm: realm.to_string(),
+            domain: None,
+            nonce,
+            opaque: None,
+            stale: stale.then(|| "true".into()),
+            algorithm: Some(auth::Algorithm::Md5),
+            qop: Some(Qop::Auth),
+            charset: None,
+        });
+
+        tx.reply_with(
+            StatusCode::ProxyAuthenticationRequired,
+            vec![rsip::Header::ProxyAuthenticate(challenge.into())],
+            None,
+        )
+        .await
+        .map_err(Error::sip_stack)
+    }
+
     fn prepare_downstream_request(
         endpoint: &Endpoint,
         downstream_listener: SocketAddr,
@@ -1350,6 +1463,15 @@ impl RsipstackBackend {
     ) -> Result<()> {
         match direction {
             TransactionDirection::Downstream => {
+                let allowed = &context.config.downstream.user_agent;
+                let realm = downstream_realm(&context);
+                if !self
+                    .ensure_downstream_proxy_authorized(&context, tx, &realm, &allowed.password)
+                    .await?
+                {
+                    return Ok(());
+                }
+
                 if let Some(contact) = tx
                     .original
                     .contact_header()
@@ -1974,10 +2096,7 @@ impl RsipstackBackend {
         }
 
         let allowed = &context.config.downstream.user_agent;
-        let realm = allowed
-            .realm
-            .clone()
-            .unwrap_or_else(|| context.config.upstream.sip_domain.clone());
+        let realm = downstream_realm(&context);
 
         let username = tx
             .original
@@ -2169,6 +2288,20 @@ impl RsipstackBackend {
 
         match direction {
             TransactionDirection::Downstream => {
+                let allowed = &context.config.downstream.user_agent;
+                let realm = downstream_realm(&context);
+                if !self
+                    .ensure_downstream_proxy_authorized(
+                        &context,
+                        &mut tx,
+                        &realm,
+                        &allowed.password,
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+
                 if let Some(call) = existing_call {
                     return self
                         .relay_dialog_request(context, &mut tx, call_id, call, direction)
@@ -2659,6 +2792,15 @@ impl RsipstackBackend {
 
         match direction {
             TransactionDirection::Downstream => {
+                let allowed = &context.config.downstream.user_agent;
+                let realm = downstream_realm(&context);
+                if !self
+                    .ensure_downstream_proxy_authorized(&context, tx, &realm, &allowed.password)
+                    .await?
+                {
+                    return Ok(());
+                }
+
                 let call = stored_call.clone();
                 let endpoint = {
                     let guard = self.inner.endpoint.read().await;
