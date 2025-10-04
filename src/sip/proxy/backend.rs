@@ -96,6 +96,8 @@ struct BackendInner {
     endpoint: RwLock<Option<Arc<Endpoint>>>,
     transport_cancel: RwLock<CancellationToken>,
     registrar: RwLock<Option<Arc<UpstreamRegistrar>>>,
+    upstream_transport: RwLock<Option<SipConnection>>,
+    downstream_transport: RwLock<Option<SipConnection>>,
 }
 
 impl Default for RsipstackBackend {
@@ -105,6 +107,8 @@ impl Default for RsipstackBackend {
                 endpoint: RwLock::new(None),
                 transport_cancel: RwLock::new(CancellationToken::new()),
                 registrar: RwLock::new(None),
+                upstream_transport: RwLock::new(None),
+                downstream_transport: RwLock::new(None),
             }),
         }
     }
@@ -124,12 +128,22 @@ impl SipBackend for RsipstackBackend {
 
         let (upstream_conn, _upstream_addr, upstream_canonical) =
             create_udp_listener(&context.config.upstream.bind, cancel.child_token()).await?;
-        transport_layer.add_transport(upstream_conn.into());
+        let upstream_transport: SipConnection = upstream_conn.into();
+        transport_layer.add_transport(upstream_transport.clone());
+        {
+            let mut guard = self.inner.upstream_transport.write().await;
+            guard.replace(upstream_transport);
+        }
         *context.sockets.upstream.lock().await = Some(upstream_canonical);
 
         let (downstream_conn, _downstream_addr, downstream_canonical) =
             create_udp_listener(&context.config.downstream.bind, cancel.child_token()).await?;
-        transport_layer.add_transport(downstream_conn.into());
+        let downstream_transport: SipConnection = downstream_conn.into();
+        transport_layer.add_transport(downstream_transport.clone());
+        {
+            let mut guard = self.inner.downstream_transport.write().await;
+            guard.replace(downstream_transport);
+        }
         *context.sockets.downstream.lock().await = Some(downstream_canonical);
 
         let mut endpoint_builder = EndpointBuilder::new();
@@ -239,6 +253,8 @@ impl SipBackend for RsipstackBackend {
         }
         self.inner.transport_cancel.write().await.cancel();
         self.inner.registrar.write().await.take();
+        self.inner.upstream_transport.write().await.take();
+        self.inner.downstream_transport.write().await.take();
         Ok(())
     }
 }
@@ -848,10 +864,24 @@ impl RsipstackBackend {
         endpoint: Arc<Endpoint>,
         request: rsip::Request,
         target: SipAddr,
+        binding: ClientTarget,
     ) -> Result<Transaction> {
         let key = TransactionKey::from_request(&request, TransactionRole::Client)
             .map_err(Error::sip_stack)?;
-        let mut tx = Transaction::new_client(key, request, endpoint.inner.clone(), None);
+        let connection = match binding {
+            ClientTarget::Upstream => {
+                let guard = self.inner.upstream_transport.read().await;
+                guard.clone()
+            }
+            ClientTarget::Downstream => {
+                let guard = self.inner.downstream_transport.read().await;
+                guard.clone()
+            }
+        }
+        .ok_or_else(|| Error::configuration("requested transport binding not available"))?;
+
+        let mut tx =
+            Transaction::new_client(key, request, endpoint.inner.clone(), Some(connection));
         tx.destination = Some(target);
         tx.send().await.map_err(Error::sip_stack)?;
         Ok(tx)
@@ -938,6 +968,7 @@ impl RsipstackBackend {
                         endpoint,
                         upstream_request,
                         call.upstream_target.clone(),
+                        ClientTarget::Upstream,
                     )
                     .await?;
 
@@ -1049,6 +1080,7 @@ impl RsipstackBackend {
                         endpoint,
                         downstream_request,
                         call.downstream_target.clone(),
+                        ClientTarget::Downstream,
                     )
                     .await?;
 
@@ -1775,7 +1807,12 @@ impl RsipstackBackend {
                 let target = Self::build_trunk_target(&config.upstream);
                 let upstream_request_clone = upstream_request.clone();
                 let client_tx = match self
-                    .start_client_transaction(endpoint.clone(), upstream_request, target.clone())
+                    .start_client_transaction(
+                        endpoint.clone(),
+                        upstream_request,
+                        target.clone(),
+                        ClientTarget::Upstream,
+                    )
                     .await
                 {
                     Ok(tx) => tx,
@@ -1952,6 +1989,7 @@ impl RsipstackBackend {
                         endpoint.clone(),
                         downstream_request,
                         downstream_target.clone(),
+                        ClientTarget::Downstream,
                     )
                     .await
                 {
@@ -2068,6 +2106,7 @@ impl RsipstackBackend {
                         endpoint,
                         upstream_request,
                         call.upstream_target.clone(),
+                        ClientTarget::Upstream,
                     )
                     .await?;
             }
@@ -2092,6 +2131,7 @@ impl RsipstackBackend {
                         endpoint,
                         downstream_request,
                         call.downstream_target.clone(),
+                        ClientTarget::Downstream,
                     )
                     .await?;
             }
@@ -2253,6 +2293,7 @@ impl RsipstackBackend {
                         endpoint,
                         upstream_request,
                         call.upstream_target.clone(),
+                        ClientTarget::Upstream,
                     )
                     .await?;
 
@@ -2336,6 +2377,7 @@ impl RsipstackBackend {
                         endpoint,
                         downstream_request,
                         call.downstream_target.clone(),
+                        ClientTarget::Downstream,
                     )
                     .await?;
 
@@ -2521,6 +2563,7 @@ impl RsipstackBackend {
                 pending.endpoint.clone(),
                 cancel,
                 pending.upstream_target.clone(),
+                ClientTarget::Upstream,
             )
             .await?;
 
@@ -2556,6 +2599,7 @@ impl RsipstackBackend {
                 pending.endpoint.clone(),
                 cancel,
                 pending.downstream_target.clone(),
+                ClientTarget::Downstream,
             )
             .await?;
 
@@ -2687,4 +2731,10 @@ async fn create_udp_listener(
 enum TransactionDirection {
     Downstream,
     Upstream,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientTarget {
+    Upstream,
+    Downstream,
 }
