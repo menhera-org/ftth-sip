@@ -1047,8 +1047,13 @@ async fn create_udp_listener(
         SocketAddr::new(bind.address, chosen_port)
     };
 
-    let resolved = SipConnection::resolve_bind_address(canonical_addr);
-    let mut sip_addr: SipAddr = resolved.into();
+    let resolved_addr = if bind.address.is_unspecified() {
+        SipConnection::resolve_bind_address(canonical_addr)
+    } else {
+        canonical_addr
+    };
+
+    let mut sip_addr: SipAddr = resolved_addr.into();
     sip_addr.r#type = Some(rsip::transport::Transport::Udp);
 
     let connection = UdpConnection::attach(
