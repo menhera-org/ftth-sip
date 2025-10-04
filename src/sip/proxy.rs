@@ -728,11 +728,12 @@ impl UpstreamRegistrar {
 
         let mut via_addr: SipAddr = local_socket.into();
         via_addr.r#type = Some(Transport::Udp);
-        let via = self
+        let mut via = self
             .endpoint
             .inner
             .get_via(Some(via_addr), None)
             .map_err(Error::sip_stack)?;
+        strip_rport_param(&mut via);
         request.headers.unique_push(rsip::Header::Via(via.into()));
         request
             .headers
@@ -975,6 +976,16 @@ fn format_socket_for_sip(addr: &SocketAddr) -> String {
     }
 }
 
+fn strip_rport_param(via: &mut typed::Via) {
+    via.params.retain(|param| {
+        if let Param::Other(name, _) = param {
+            !name.value().eq_ignore_ascii_case("rport")
+        } else {
+            true
+        }
+    });
+}
+
 fn downstream_realm(context: &SipContext) -> String {
     context
         .config
@@ -1179,10 +1190,11 @@ impl RsipstackBackend {
         };
         let mut via_addr: SipAddr = SocketAddr::new(via_ip, via_port).into();
         via_addr.r#type = Some(Transport::Udp);
-        let via = endpoint
+        let mut via = endpoint
             .inner
             .get_via(Some(via_addr.clone()), None)
             .map_err(Error::sip_stack)?;
+        strip_rport_param(&mut via);
         request.headers.unique_push(rsip::Header::Via(via.into()));
 
         let identity_uri_string = format!("sip:{}@{}", identity, upstream_config.sip_domain);
@@ -1632,10 +1644,11 @@ impl RsipstackBackend {
 
         let mut via_addr: SipAddr = downstream_listener.into();
         via_addr.r#type = Some(Transport::Udp);
-        let via = endpoint
+        let mut via = endpoint
             .inner
             .get_via(Some(via_addr.clone()), None)
             .map_err(Error::sip_stack)?;
+        strip_rport_param(&mut via);
         request.headers.unique_push(rsip::Header::Via(via.into()));
 
         let max_forwards = request
