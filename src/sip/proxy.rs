@@ -28,7 +28,8 @@ use ftth_rsipstack::EndpointBuilder;
 use ftth_rsipstack::transaction::Endpoint;
 use ftth_rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use ftth_rsipstack::transaction::transaction::Transaction;
-use rsip::common::uri::param::Tag;
+use rsip::common::uri::UriWithParamsList;
+use rsip::common::uri::{UriWithParams, param::Tag};
 use rsip::headers::auth::{self, AuthQop, Qop};
 use rsip::headers::{
     CallId as HeaderCallId, Contact, ContentEncoding, ContentLength as HeaderContentLength,
@@ -50,6 +51,7 @@ pub struct SipContext {
     pub registrations: Arc<RwLock<RegistrationCache>>,
     pub sockets: Arc<ListenerSockets>,
     pub calls: Arc<RwLock<HashMap<String, CallContext>>>,
+    pub route_set: Arc<RwLock<Vec<UriWithParams>>>,
     auth: Arc<DownstreamAuthState>,
     pending: Arc<RwLock<HashMap<String, PendingInvite>>>,
 }
@@ -233,6 +235,7 @@ where
             registrations: Arc::new(RwLock::new(RegistrationCache::new())),
             sockets: Arc::new(ListenerSockets::default()),
             calls: Arc::new(RwLock::new(HashMap::new())),
+            route_set: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(DownstreamAuthState::new()),
             pending: Arc::new(RwLock::new(HashMap::new())),
         };
@@ -619,6 +622,7 @@ impl UpstreamRegistrar {
                     debug!(status = %response.status_code, "received upstream REGISTER response");
                     match response.status_code {
                         StatusCode::OK => {
+                            self.update_route_set_from_response(&response).await;
                             let refresh = self.schedule_from_response(&response, expires_hint)?;
                             self.nonce_count.store(0, Ordering::SeqCst);
                             return Ok(refresh);
@@ -823,6 +827,36 @@ impl UpstreamRegistrar {
         };
 
         Ok(Duration::from_secs(refresh_secs.max(1)))
+    }
+
+    async fn update_route_set_from_response(&self, response: &rsip::Response) {
+        let routes = Self::extract_route_set(response);
+        let mut guard = self.context.route_set.write().await;
+        *guard = routes;
+    }
+
+    fn extract_route_set(response: &rsip::Response) -> Vec<UriWithParams> {
+        let mut routes = Vec::new();
+
+        for header in response.headers.iter() {
+            match header {
+                rsip::Header::Other(name, value)
+                    if name.eq_ignore_ascii_case("Path")
+                        || name.eq_ignore_ascii_case("Service-Route") =>
+                {
+                    let route_header = rsip::headers::Route::from(value.clone());
+                    match route_header.typed() {
+                        Ok(list) => routes.extend(list.uris().iter().cloned()),
+                        Err(err) => {
+                            warn!(header = %name, error = %err, "failed to parse route set entry")
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        routes
     }
 
     async fn store_challenge(&self, challenge: &rsip::typed::WwwAuthenticate) -> Result<()> {
@@ -1132,6 +1166,7 @@ impl RsipstackBackend {
         original: &rsip::Request,
         body_override: Option<Vec<u8>>,
         identity: &str,
+        route_set: &[UriWithParams],
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
 
@@ -1158,6 +1193,9 @@ impl RsipstackBackend {
         request
             .headers
             .retain(|header| !matches!(header, rsip::Header::From(_)));
+        request
+            .headers
+            .retain(|header| !matches!(header, rsip::Header::Route(_)));
         request.headers.retain(|header| {
             !matches!(header, rsip::Header::Other(name, _) if {
                 let lower = name.to_ascii_lowercase();
@@ -1253,6 +1291,13 @@ impl RsipstackBackend {
         request
             .headers
             .unique_push(rsip::Header::Other("P-Asserted-Identity".into(), asserted));
+
+        if !route_set.is_empty() {
+            let route_value = UriWithParamsList::from(route_set.to_vec()).to_string();
+            request
+                .headers
+                .unique_push(rsip::Header::Route(rsip::headers::Route::from(route_value)));
+        }
 
         let max_forwards = request
             .max_forwards_header()
@@ -1766,6 +1811,8 @@ impl RsipstackBackend {
                     body_override = Some(rewrite.sdp.into_bytes());
                 }
 
+                let route_set = { context.route_set.read().await.clone() };
+
                 let upstream_request = Self::prepare_upstream_request(
                     &endpoint,
                     upstream_listener,
@@ -1773,6 +1820,7 @@ impl RsipstackBackend {
                     &tx.original,
                     body_override,
                     &call.identity,
+                    &route_set,
                 )?;
 
                 let mut client_tx = self
@@ -2588,6 +2636,7 @@ impl RsipstackBackend {
                 };
 
                 let config = context.config.as_ref();
+                let route_set = { context.route_set.read().await.clone() };
                 let upstream_request = Self::prepare_upstream_request(
                     &endpoint,
                     upstream_listener,
@@ -2595,6 +2644,7 @@ impl RsipstackBackend {
                     &original_request,
                     rewritten_body,
                     &identity,
+                    &route_set,
                 )?;
 
                 let target = Self::build_trunk_target(&config.upstream);
@@ -2873,6 +2923,7 @@ impl RsipstackBackend {
                 };
 
                 let config = context.config.as_ref();
+                let route_set = { context.route_set.read().await.clone() };
                 let upstream_request = Self::prepare_upstream_request(
                     &endpoint,
                     upstream_listener,
@@ -2880,6 +2931,7 @@ impl RsipstackBackend {
                     &tx.original,
                     None,
                     &call.identity,
+                    &route_set,
                 )?;
 
                 let _ = self
@@ -3056,6 +3108,7 @@ impl RsipstackBackend {
                 };
 
                 let config = context.config.as_ref();
+                let route_set = { context.route_set.read().await.clone() };
                 let upstream_request = Self::prepare_upstream_request(
                     &endpoint,
                     upstream_listener,
@@ -3063,6 +3116,7 @@ impl RsipstackBackend {
                     &tx.original,
                     None,
                     &call.identity,
+                    &route_set,
                 )?;
 
                 let mut client_tx = self
