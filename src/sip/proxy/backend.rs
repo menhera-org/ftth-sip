@@ -415,16 +415,10 @@ impl RsipstackBackend {
                 .unique_push(rsip::Header::Route(rsip::headers::Route::from(route_value)));
         }
 
-        let max_forwards = request
-            .max_forwards_header()
-            .ok()
-            .and_then(|mf| mf.num().ok())
-            .and_then(|value| value.checked_sub(1))
-            .unwrap_or(69);
         request
             .headers
             .unique_push(rsip::Header::MaxForwards(rsip::headers::MaxForwards::from(
-                max_forwards,
+                70u32,
             )));
 
         Ok(request)
