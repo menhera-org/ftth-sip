@@ -430,17 +430,36 @@ impl RsipstackBackend {
                 .map(|value| {
                     let trimmed = value.trim();
                     if trimmed.is_empty() {
-                        format!("<{}>", identity_uri_string)
-                    } else if trimmed.starts_with('<') {
-                        trimmed.to_string()
-                    } else if trimmed.starts_with("sip:") || trimmed.starts_with("tel:") {
-                        format!("<{}>", trimmed)
-                    } else if trimmed.contains('@') {
-                        format!("<sip:{}>", trimmed)
+                        None
                     } else {
-                        format!("<sip:{}@{}>", trimmed, upstream_config.sip_domain)
+                        let without_brackets = trimmed.trim_matches(|c| c == '<' || c == '>');
+                        let normalized = if without_brackets.starts_with("sip:") {
+                            without_brackets.to_string()
+                        } else if without_brackets.starts_with("tel:") {
+                            without_brackets.to_string()
+                        } else if without_brackets.contains('@') {
+                            format!("sip:{}", without_brackets)
+                        } else {
+                            format!("sip:{}@{}", without_brackets, upstream_config.sip_domain)
+                        };
+
+                        let mut user = if normalized.starts_with("tel:") {
+                            normalized.trim_start_matches("tel:").to_string()
+                        } else {
+                            Uri::try_from(normalized.as_str())
+                                .ok()
+                                .and_then(|uri| uri.auth.map(|auth| auth.user))
+                                .unwrap_or_default()
+                        };
+
+                        if user.is_empty() {
+                            user = identity.to_string();
+                        }
+
+                        Some(format!("<sip:{}@{}>", user, upstream_config.sip_domain))
                     }
                 })
+                .flatten()
                 .unwrap_or_else(|| format!("<{}>", identity_uri_string));
 
             request.headers.push(rsip::Header::Other(
