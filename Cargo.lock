@@ -376,14 +376,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
-name = "ftth-rsipstack"
-version = "2.0.0"
+name = "ftth-rsip"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e068e091d8b0a4ec34e969556fb545e40fafef6002584857a585797c9b55d3fc"
+checksum = "bdc2df86b661409c85aa394f65324694d0d3bed23142d2146469147e2b07be8e"
+dependencies = [
+ "bstr",
+ "bytes",
+ "md-5",
+ "nom",
+ "rsip-derives",
+ "sha2",
+ "uuid",
+]
+
+[[package]]
+name = "ftth-rsipstack"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbfcdafec05fba700f614612c6d73885da15b74bae87753e92d0dec072d9389f"
 dependencies = [
  "async-trait",
  "bytes",
  "clap",
+ "ftth-rsip",
  "futures",
  "futures-util",
  "get_if_addrs",
@@ -409,7 +425,6 @@ dependencies = [
  "ftth-rsipstack",
  "libc",
  "md5",
- "rsip",
  "serde",
  "serde_with",
  "socket2",

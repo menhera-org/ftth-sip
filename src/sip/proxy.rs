@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use ftth_rsipstack::rsip;
 use ftth_rsipstack::transaction::endpoint::MessageInspector;
 use ftth_rsipstack::transport::udp::{UdpConnection, UdpInner};
 use ftth_rsipstack::transport::{SipAddr, SipConnection, TransportLayer};
@@ -35,7 +36,7 @@ use rsip::headers::{
 use rsip::message::headers_ext::HeadersExt;
 use rsip::typed;
 use rsip::{
-    self, Method, Param, Response, SipMessage, StatusCode, StatusCodeKind, Uri, Version,
+    Method, Param, Response, SipMessage, StatusCode, StatusCodeKind, Uri, Version,
     host_with_port::HostWithPort, transport::Transport,
 };
 use tracing::{debug, error, info, warn};
