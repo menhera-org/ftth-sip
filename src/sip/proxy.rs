@@ -1243,6 +1243,24 @@ impl RsipstackBackend {
         Ok(request)
     }
 
+    fn registration_expiry_seconds(
+        request: &rsip::Request,
+        contact: &typed::Contact,
+        default_expires: u64,
+    ) -> u64 {
+        if let Some(contact_expires) = contact.expires().and_then(|expires| expires.seconds().ok())
+        {
+            contact_expires as u64
+        } else if let Some(expires_header) = request.expires_header() {
+            expires_header
+                .seconds()
+                .map(|value| value as u64)
+                .unwrap_or(default_expires)
+        } else {
+            default_expires
+        }
+    }
+
     fn build_trunk_target(upstream_config: &crate::config::UpstreamConfig) -> SipAddr {
         let socket = SocketAddr::new(upstream_config.trunk_addr, upstream_config.trunk_port);
         let mut target: SipAddr = socket.into();
@@ -2349,27 +2367,22 @@ impl RsipstackBackend {
             return Ok(());
         }
 
-        let default_expires = context.config.timers.registration_refresh_secs;
-        let expires_secs = match tx.original.expires_header() {
-            Some(expires) => expires
-                .seconds()
-                .map(|value| value as u64)
-                .unwrap_or(default_expires),
-            None => default_expires,
-        };
-
-        if expires_secs == 0 {
-            context.registrations.write().await.clear();
-            tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
-            return Ok(());
-        }
-
         let contact = tx
             .original
             .contact_header()
             .map_err(Error::sip_stack)?
             .typed()
             .map_err(Error::sip_stack)?;
+
+        let default_expires = context.config.timers.registration_refresh_secs;
+        let expires_secs =
+            Self::registration_expiry_seconds(&tx.original, &contact, default_expires);
+
+        if expires_secs == 0 {
+            context.registrations.write().await.clear();
+            tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
+            return Ok(());
+        }
 
         let via_header = tx.original.via_header().map_err(Error::sip_stack)?;
         let remote_addr = resolve_remote_from_via(via_header).map_err(Error::Media)?;
@@ -2559,9 +2572,24 @@ impl RsipstackBackend {
 
                 let target = Self::build_trunk_target(&config.upstream);
                 let upstream_request_clone = upstream_request.clone();
-                let client_tx = self
+                let client_tx = match self
                     .start_client_transaction(endpoint.clone(), upstream_request, target.clone())
-                    .await?;
+                    .await
+                {
+                    Ok(tx) => tx,
+                    Err(err) => {
+                        warn!(error = %err, "failed to start upstream INVITE transaction");
+                        context.media.release(&media_key).await;
+                        {
+                            let mut downstream = downstream_tx.lock().await;
+                            downstream
+                                .reply(StatusCode::ServiceUnavailable)
+                                .await
+                                .map_err(Error::sip_stack)?;
+                        }
+                        return Ok(());
+                    }
+                };
 
                 let cancel_token = CancellationToken::new();
 
@@ -2713,13 +2741,28 @@ impl RsipstackBackend {
 
                 let downstream_request_clone = downstream_request.clone();
 
-                let client_tx = self
+                let client_tx = match self
                     .start_client_transaction(
                         endpoint.clone(),
                         downstream_request,
                         downstream_target.clone(),
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(tx) => tx,
+                    Err(err) => {
+                        warn!(error = %err, "failed to start downstream INVITE transaction");
+                        context.media.release(&media_key).await;
+                        {
+                            let mut upstream = upstream_tx.lock().await;
+                            upstream
+                                .reply(StatusCode::ServiceUnavailable)
+                                .await
+                                .map_err(Error::sip_stack)?;
+                        }
+                        return Ok(());
+                    }
+                };
 
                 let cancel_token = CancellationToken::new();
                 context.pending.write().await.insert(
