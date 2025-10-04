@@ -1272,28 +1272,9 @@ impl RsipstackBackend {
         tx: &mut Transaction,
         realm: &str,
         username: &str,
-        password: &str,
+        password: Option<&str>,
     ) -> Result<bool> {
-        if username.is_empty() {
-            let proxy_header =
-                tx.original
-                    .headers
-                    .clone()
-                    .into_iter()
-                    .find_map(|header| match header {
-                        rsip::Header::ProxyAuthorization(value) => Some(value),
-                        _ => None,
-                    });
-            let Some(header) = proxy_header else {
-                self.challenge_downstream_proxy(context, tx, realm, false)
-                    .await?;
-                return Ok(false);
-            };
-            let proxy_auth = header.typed().map_err(Error::sip_stack)?.0.clone();
-
-            self.verify_digest(context, tx, realm, None, password, proxy_auth, true)
-                .await
-        } else {
+        if let Some(password) = password {
             let register_header =
                 tx.original
                     .headers
@@ -1304,6 +1285,7 @@ impl RsipstackBackend {
                         _ => None,
                     });
             let Some(header) = register_header else {
+                warn!(realm, "downstream REGISTER missing Authorization header");
                 self.challenge_downstream_register(context, tx, realm, false)
                     .await?;
                 return Ok(false);
@@ -1311,6 +1293,7 @@ impl RsipstackBackend {
             let auth = header.typed().map_err(Error::sip_stack)?;
 
             if !auth.username.eq_ignore_ascii_case(username) {
+                warn!(expected = %username, received = %auth.username, "downstream username mismatch");
                 self.challenge_downstream_register(context, tx, realm, false)
                     .await?;
                 return Ok(false);
@@ -1318,6 +1301,8 @@ impl RsipstackBackend {
 
             self.verify_digest(context, tx, realm, Some(username), password, auth, false)
                 .await
+        } else {
+            Ok(true)
         }
     }
 
@@ -1332,6 +1317,7 @@ impl RsipstackBackend {
         proxy: bool,
     ) -> Result<bool> {
         if auth.scheme != auth::Scheme::Digest {
+            warn!(realm, proxy, scheme=?auth.scheme, "unsupported auth scheme");
             if proxy {
                 self.challenge_downstream_proxy(context, tx, realm, false)
                     .await?;
@@ -1343,6 +1329,7 @@ impl RsipstackBackend {
         }
 
         if auth.realm != realm {
+            warn!(expected = %realm, received = %auth.realm, proxy, "realm mismatch");
             if proxy {
                 self.challenge_downstream_proxy(context, tx, realm, false)
                     .await?;
@@ -1355,6 +1342,7 @@ impl RsipstackBackend {
 
         if let Some(user) = username {
             if !auth.username.eq_ignore_ascii_case(user) {
+                warn!(expected = %user, received = %auth.username, "downstream username mismatch");
                 self.challenge_downstream_register(context, tx, realm, false)
                     .await?;
                 return Ok(false);
@@ -1363,6 +1351,7 @@ impl RsipstackBackend {
 
         if let Some(algorithm) = auth.algorithm {
             if algorithm != auth::Algorithm::Md5 {
+                warn!(?algorithm, "unsupported digest algorithm");
                 if proxy {
                     self.challenge_downstream_proxy(context, tx, realm, false)
                         .await?;
@@ -1375,6 +1364,7 @@ impl RsipstackBackend {
         }
 
         if !context.auth.is_valid(&auth.nonce).await {
+            warn!(nonce = %auth.nonce, proxy, "nonce invalid or expired");
             if proxy {
                 self.challenge_downstream_proxy(context, tx, realm, true)
                     .await?;
@@ -1404,6 +1394,7 @@ impl RsipstackBackend {
 
         let provided = auth.response.to_ascii_lowercase();
         if !constant_time_eq(expected_response.as_bytes(), provided.as_bytes()) {
+            warn!("downstream digest response mismatch");
             context.auth.invalidate(&auth.nonce).await;
             if proxy {
                 self.challenge_downstream_proxy(context, tx, realm, true)
@@ -1424,10 +1415,31 @@ impl RsipstackBackend {
         context: &SipContext,
         tx: &mut Transaction,
         realm: &str,
-        password: &str,
+        password: Option<&str>,
     ) -> Result<bool> {
-        self.ensure_downstream_authorized(context, tx, realm, "", password)
-            .await
+        if let Some(password) = password {
+            let proxy_header =
+                tx.original
+                    .headers
+                    .clone()
+                    .into_iter()
+                    .find_map(|header| match header {
+                        rsip::Header::ProxyAuthorization(value) => Some(value),
+                        _ => None,
+                    });
+            let Some(header) = proxy_header else {
+                warn!(realm, "downstream proxy auth missing, issuing challenge");
+                self.challenge_downstream_proxy(context, tx, realm, false)
+                    .await?;
+                return Ok(false);
+            };
+            let proxy_auth = header.typed().map_err(Error::sip_stack)?.0.clone();
+
+            self.verify_digest(context, tx, realm, None, password, proxy_auth, true)
+                .await
+        } else {
+            Ok(true)
+        }
     }
 
     async fn challenge_downstream_proxy(
@@ -1556,7 +1568,12 @@ impl RsipstackBackend {
                 let allowed = &context.config.downstream.user_agent;
                 let realm = downstream_realm(&context);
                 if !self
-                    .ensure_downstream_proxy_authorized(&context, tx, &realm, &allowed.password)
+                    .ensure_downstream_proxy_authorized(
+                        &context,
+                        tx,
+                        &realm,
+                        allowed.password.as_deref(),
+                    )
                     .await?
                 {
                     return Ok(());
@@ -2086,6 +2103,7 @@ impl RsipstackBackend {
 
         match pending_entry {
             PendingInvite::Outbound(pending) => {
+                warn!(call_id = %call_id, "outbound INVITE timed out before completion");
                 pending.cancel_token.cancel();
                 {
                     let mut downstream = pending.downstream_tx.lock().await;
@@ -2101,6 +2119,7 @@ impl RsipstackBackend {
                 context.media.release(&pending.media_key).await;
             }
             PendingInvite::Inbound(pending) => {
+                warn!(call_id = %call_id, "inbound INVITE timed out before completion");
                 pending.cancel_token.cancel();
                 {
                     let mut upstream = pending.upstream_tx.lock().await;
@@ -2213,7 +2232,7 @@ impl RsipstackBackend {
                 tx,
                 &realm,
                 &allowed.username,
-                &allowed.password,
+                allowed.password.as_deref(),
             )
             .await?;
         if !authenticated {
@@ -2325,7 +2344,7 @@ impl RsipstackBackend {
                         &context,
                         &mut tx,
                         &realm,
-                        &allowed.password,
+                        allowed.password.as_deref(),
                     )
                     .await?
                 {
@@ -2825,7 +2844,12 @@ impl RsipstackBackend {
                 let allowed = &context.config.downstream.user_agent;
                 let realm = downstream_realm(&context);
                 if !self
-                    .ensure_downstream_proxy_authorized(&context, tx, &realm, &allowed.password)
+                    .ensure_downstream_proxy_authorized(
+                        &context,
+                        tx,
+                        &realm,
+                        allowed.password.as_deref(),
+                    )
                     .await?
                 {
                     return Ok(());

@@ -25,6 +25,7 @@ mod tests {
     use super::sip::FtthSipProxyBuilder;
 
     #[tokio::test]
+    #[ignore = "requires privileged network bind"]
     async fn build_proxy_runtime() {
         let config = ProxyConfig {
             upstream: UpstreamConfig {
@@ -54,7 +55,7 @@ mod tests {
                 user_agent: AllowedUserAgent {
                     username: "asterisk".into(),
                     realm: Some("asterisk.local".into()),
-                    password: "secret".into(),
+                    password: Some("secret".into()),
                 },
                 transport: TransportProfile::Udp,
             },

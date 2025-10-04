@@ -78,9 +78,9 @@ struct Cli {
     #[arg(long)]
     downstream_username: String,
 
-    /// Password shared with downstream user agent for digest auth
+    /// Optional password shared with downstream user agent for digest auth
     #[arg(long)]
-    downstream_password: String,
+    downstream_password: Option<String>,
 
     /// Optional realm override for downstream digest auth
     #[arg(long)]

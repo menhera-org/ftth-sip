@@ -637,3 +637,36 @@ fn bind_udp_socket(bind: &BindConfig, port: u16) -> Result<UdpSocket> {
     udp.set_broadcast(true)?;
     Ok(udp)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_sdp_filters_to_pcmu_when_forced() {
+        let input = "v=0\n\
+o=- 0 0 IN IP4 10.0.0.1\n\
+s=-\n\
+c=IN IP4 10.0.0.1\n\
+t=0 0\n\
+m=audio 49170 RTP/AVP 0 8 101\n\
+a=rtpmap:0 PCMU/8000\n\
+a=rtpmap:8 PCMA/8000\n\
+a=rtpmap:101 telephone-event/8000\n";
+
+        let rewrite = rewrite_sdp(
+            input,
+            IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 10)),
+            50000,
+            true,
+        )
+        .expect("rewrite succeeds");
+
+        assert!(rewrite.sdp.contains("m=audio 50000 RTP/AVP 0"));
+        assert!(rewrite.sdp.contains("a=rtpmap:0 PCMU/8000"));
+        assert!(!rewrite.sdp.contains("a=rtpmap:8"));
+        assert!(!rewrite.sdp.contains("a=rtpmap:101"));
+        assert_eq!(rewrite.remote_rtp, "10.0.0.1:49170".parse().unwrap());
+        assert_eq!(rewrite.remote_rtcp, "10.0.0.1:49171".parse().unwrap());
+    }
+}
