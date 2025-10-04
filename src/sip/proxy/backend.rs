@@ -1559,18 +1559,22 @@ impl RsipstackBackend {
             .typed()
             .map_err(Error::sip_stack)?;
 
+        let via_header = tx.original.via_header().map_err(Error::sip_stack)?;
+        let remote_addr = resolve_remote_from_via(via_header).map_err(Error::Media)?;
+
         let default_expires = context.config.timers.registration_refresh_secs;
         let expires_secs =
             Self::registration_expiry_seconds(&tx.original, &contact, default_expires);
 
         if expires_secs == 0 {
+            debug!(
+                source = %remote_addr,
+                "clearing downstream registration after expires=0 request"
+            );
             context.registrations.write().await.clear();
             tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
             return Ok(());
         }
-
-        let via_header = tx.original.via_header().map_err(Error::sip_stack)?;
-        let remote_addr = resolve_remote_from_via(via_header).map_err(Error::Media)?;
 
         let registration = DownstreamRegistration {
             contact,
@@ -1579,7 +1583,18 @@ impl RsipstackBackend {
             source: remote_addr,
         };
 
-        context.registrations.write().await.upsert(registration);
+        context
+            .registrations
+            .write()
+            .await
+            .upsert(registration.clone());
+
+        debug!(
+            contact = %registration.contact.uri,
+            expires = expires_secs,
+            source = %registration.source,
+            "updated downstream registration"
+        );
 
         tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
 
@@ -1840,6 +1855,10 @@ impl RsipstackBackend {
                 let registration = match registration {
                     Some(reg) if reg.is_active(Instant::now()) => reg,
                     _ => {
+                        debug!(
+                            registration = ?registration,
+                            "no active downstream registration; replying 480 to upstream INVITE"
+                        );
                         tx.reply(StatusCode::TemporarilyUnavailable)
                             .await
                             .map_err(Error::sip_stack)?;
