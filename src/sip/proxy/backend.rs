@@ -2056,13 +2056,11 @@ impl RsipstackBackend {
                     });
 
                 let upstream_tx = Arc::new(Mutex::new(tx));
-                {
-                    let mut guard = upstream_tx.lock().await;
-                    guard.send_trying().await.map_err(Error::sip_stack)?;
-                }
-
                 let original_request = {
-                    let guard = upstream_tx.lock().await;
+                    let mut guard = upstream_tx.lock().await;
+                    if guard.original.method == Method::Invite {
+                        guard.send_trying().await.map_err(Error::sip_stack)?;
+                    }
                     guard.original.clone()
                 };
 
