@@ -447,10 +447,6 @@ impl RsipstackBackend {
                 "P-Preferred-Identity".into(),
                 p_preferred.clone(),
             ));
-            request.headers.unique_push(rsip::Header::Other(
-                "P-Asserted-Identity".into(),
-                p_preferred,
-            ));
 
             if !route_set.is_empty() {
                 let route_value = UriWithParamsList::from(route_set.to_vec()).to_string();
