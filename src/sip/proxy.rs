@@ -1042,10 +1042,15 @@ async fn create_udp_listener(
     let udp_socket = UdpSocket::from_std(std_socket).map_err(Error::Transport)?;
     let local_addr = udp_socket.local_addr().map_err(Error::Transport)?;
 
-    let canonical_addr = if bind.address.is_unspecified() {
-        local_addr
+    let chosen_port = if bind.port == 0 {
+        local_addr.port()
     } else {
-        SocketAddr::new(bind.address, local_addr.port())
+        bind.port
+    };
+    let canonical_addr = if bind.address.is_unspecified() {
+        SocketAddr::new(local_addr.ip(), chosen_port)
+    } else {
+        SocketAddr::new(bind.address, chosen_port)
     };
 
     let resolved = SipConnection::resolve_bind_address(canonical_addr);
@@ -1156,7 +1161,12 @@ impl RsipstackBackend {
         } else {
             upstream_config.bind.address
         };
-        let mut via_addr: SipAddr = SocketAddr::new(via_ip, upstream_listener.port()).into();
+        let via_port = if upstream_config.bind.port == 0 {
+            upstream_listener.port()
+        } else {
+            upstream_config.bind.port
+        };
+        let mut via_addr: SipAddr = SocketAddr::new(via_ip, via_port).into();
         via_addr.r#type = Some(Transport::Udp);
         let via = endpoint
             .inner
@@ -1192,10 +1202,12 @@ impl RsipstackBackend {
         } else {
             upstream_config.bind.address
         };
-        let identity_contact = format!(
-            "sip:{}@{}:{}",
-            identity, contact_ip, upstream_config.bind.port
-        );
+        let contact_port = if upstream_config.bind.port == 0 {
+            upstream_listener.port()
+        } else {
+            upstream_config.bind.port
+        };
+        let identity_contact = format!("sip:{}@{}:{}", identity, contact_ip, contact_port);
         let contact_uri = Uri::try_from(identity_contact.as_str()).map_err(Error::sip_stack)?;
         let contact_header = Contact::from(format!("<{}>", contact_uri));
         request
