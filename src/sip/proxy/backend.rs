@@ -443,7 +443,7 @@ impl RsipstackBackend {
                 })
                 .unwrap_or_else(|| format!("<{}>", identity_uri_string));
 
-            request.headers.unique_push(rsip::Header::Other(
+            request.headers.push(rsip::Header::Other(
                 "P-Preferred-Identity".into(),
                 p_preferred.clone(),
             ));
@@ -472,7 +472,7 @@ impl RsipstackBackend {
             });
             request
                 .headers
-                .unique_push(rsip::Header::Other("Session-Expires".into(), "300".into()));
+                .push(rsip::Header::Other("Session-Expires".into(), "300".into()));
         } else {
             if !route_set.is_empty() {
                 let route_value = UriWithParamsList::from(route_set.to_vec()).to_string();
