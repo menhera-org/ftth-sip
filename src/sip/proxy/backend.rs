@@ -788,6 +788,7 @@ impl RsipstackBackend {
         call: &CallContext,
         original: &rsip::Request,
         body_override: Option<Vec<u8>>,
+        strip_user: bool,
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
 
@@ -807,9 +808,7 @@ impl RsipstackBackend {
             .retain(|header| !matches!(header, rsip::Header::Via(_)));
 
         let mut target_uri = if let Some(contact_uri) = &call.downstream_contact {
-            let mut uri = contact_uri.clone();
-            uri.auth = None;
-            uri
+            contact_uri.clone()
         } else {
             let downstream_host = downstream_listener.to_string();
             let host_with_port =
@@ -818,7 +817,9 @@ impl RsipstackBackend {
             uri.host_with_port = host_with_port;
             uri
         };
-        target_uri.auth = None;
+        if strip_user {
+            target_uri.auth = None;
+        }
         request.uri = target_uri;
 
         let original_uri_string = original_uri.to_string();
@@ -1113,6 +1114,7 @@ impl RsipstackBackend {
                     &call,
                     &tx.original,
                     body_override,
+                    false,
                 )?;
 
                 let mut client_tx = self
@@ -2034,6 +2036,7 @@ impl RsipstackBackend {
                     &call_template,
                     &original_request,
                     rewritten_body,
+                    true,
                 )?;
 
                 let downstream_request_clone = downstream_request.clone();
@@ -2178,6 +2181,7 @@ impl RsipstackBackend {
                     &call,
                     &tx.original,
                     None,
+                    false,
                 )?;
 
                 let _ = self
@@ -2424,6 +2428,7 @@ impl RsipstackBackend {
                     &call,
                     &tx.original,
                     body_override,
+                    false,
                 )?;
 
                 let mut client_tx = self
