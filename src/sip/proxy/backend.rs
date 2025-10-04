@@ -806,14 +806,20 @@ impl RsipstackBackend {
             .headers
             .retain(|header| !matches!(header, rsip::Header::Via(_)));
 
-        if let Some(contact_uri) = &call.downstream_contact {
-            request.uri = contact_uri.clone();
+        let mut target_uri = if let Some(contact_uri) = &call.downstream_contact {
+            let mut uri = contact_uri.clone();
+            uri.auth = None;
+            uri
         } else {
             let downstream_host = downstream_listener.to_string();
             let host_with_port =
                 HostWithPort::try_from(downstream_host.as_str()).map_err(Error::sip_stack)?;
-            request.uri.host_with_port = host_with_port;
-        }
+            let mut uri = request.uri.clone();
+            uri.host_with_port = host_with_port;
+            uri
+        };
+        target_uri.auth = None;
+        request.uri = target_uri;
 
         let original_uri_string = original_uri.to_string();
         let has_original_uri_header = request.headers.iter().any(|header| match header {
