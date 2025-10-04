@@ -1,0 +1,150 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use tokio::runtime::Builder as RuntimeBuilder;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+use crate::error::{Error, Result};
+use crate::media::MediaRelayBuilder;
+
+use super::backend::{RsipstackBackend, SipBackend};
+use super::state::{DownstreamAuthState, ListenerSockets, SipContext};
+use crate::sip::registration::RegistrationCache;
+
+pub struct FtthSipProxyBuilder<B = RsipstackBackend> {
+    config: crate::config::ProxyConfig,
+    backend: B,
+}
+
+impl FtthSipProxyBuilder<RsipstackBackend> {
+    pub fn new(config: crate::config::ProxyConfig) -> Self {
+        Self {
+            config,
+            backend: RsipstackBackend::default(),
+        }
+    }
+}
+
+impl<B> FtthSipProxyBuilder<B>
+where
+    B: SipBackend,
+{
+    pub fn with_backend(mut self, backend: B) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    pub async fn build(self) -> Result<ProxyRuntime<B>> {
+        let media = MediaRelayBuilder::from_config(&self.config.media)?.build();
+        let context = SipContext {
+            config: Arc::new(self.config),
+            media: Arc::new(media),
+            registrations: Arc::new(tokio::sync::RwLock::new(RegistrationCache::new())),
+            sockets: Arc::new(ListenerSockets::default()),
+            calls: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            route_set: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            auth: Arc::new(DownstreamAuthState::new()),
+            pending: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        };
+
+        Ok(ProxyRuntime {
+            backend: Arc::new(self.backend),
+            context,
+        })
+    }
+}
+
+pub struct ProxyRuntime<B: SipBackend> {
+    backend: Arc<B>,
+    context: SipContext,
+}
+
+impl<B> ProxyRuntime<B>
+where
+    B: SipBackend,
+{
+    pub async fn start(self) -> Result<ProxyHandle> {
+        self.backend.initialize(&self.context).await?;
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let backend = self.backend.clone();
+        let context = self.context.clone();
+
+        let worker: JoinHandle<Result<()>> = tokio::task::spawn_blocking(move || {
+            let runtime = RuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(Error::Transport)?;
+
+            let mut shutdown = ShutdownSignal::new(shutdown_rx);
+            runtime.block_on(async {
+                backend.run(context, &mut shutdown).await?;
+                backend.shutdown().await
+            })
+        });
+
+        Ok(ProxyHandle {
+            shutdown_tx,
+            worker,
+        })
+    }
+}
+
+pub struct ProxyHandle {
+    shutdown_tx: watch::Sender<bool>,
+    worker: JoinHandle<Result<()>>,
+}
+
+impl ProxyHandle {
+    pub fn signal_shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+
+    pub async fn wait(self) -> Result<()> {
+        let Self {
+            shutdown_tx: _,
+            worker,
+        } = self;
+        match worker.await {
+            Ok(result) => result,
+            Err(join_error) => Err(Error::Media(format!("proxy task panicked: {join_error}"))),
+        }
+    }
+
+    pub async fn shutdown(self) -> Result<()> {
+        let Self {
+            shutdown_tx,
+            worker,
+        } = self;
+        let _ = shutdown_tx.send(true);
+        match worker.await {
+            Ok(result) => result,
+            Err(join_error) => Err(Error::Media(format!("proxy task panicked: {join_error}"))),
+        }
+    }
+}
+
+pub struct ShutdownSignal {
+    inner: watch::Receiver<bool>,
+}
+
+impl ShutdownSignal {
+    fn new(inner: watch::Receiver<bool>) -> Self {
+        Self { inner }
+    }
+
+    pub async fn recv(&mut self) {
+        if *self.inner.borrow() {
+            return;
+        }
+
+        while self.inner.changed().await.is_ok() {
+            if *self.inner.borrow() {
+                break;
+            }
+        }
+    }
+}
+
+pub type FtthSipProxy = ProxyRuntime<RsipstackBackend>;

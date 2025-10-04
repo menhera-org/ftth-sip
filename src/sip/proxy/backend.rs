@@ -1,35 +1,18 @@
-use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use ftth_rsipstack::rsip;
-use ftth_rsipstack::transaction::endpoint::MessageInspector;
-use ftth_rsipstack::transport::udp::{UdpConnection, UdpInner};
-use ftth_rsipstack::transport::{SipAddr, SipConnection, TransportLayer};
-use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::UdpSocket;
-use tokio::runtime::Builder as RuntimeBuilder;
-use tokio::sync::{Mutex, Notify, RwLock, watch};
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
-
-use crate::config::{BindConfig, ProxyConfig};
-use crate::error::{Error, Result};
-use crate::media::{MediaRelay, MediaRelayBuilder, MediaSessionHandle, MediaSessionKey};
-use crate::net::bind_to_device;
-
-use super::registration::{DownstreamRegistration, RegistrationCache};
-
 use ftth_rsipstack::EndpointBuilder;
+use ftth_rsipstack::rsip;
 use ftth_rsipstack::transaction::Endpoint;
+use ftth_rsipstack::transaction::endpoint::MessageInspector;
 use ftth_rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use ftth_rsipstack::transaction::transaction::Transaction;
-use rsip::common::uri::UriWithParamsList;
-use rsip::common::uri::{UriWithParams, param::Tag};
+use ftth_rsipstack::transport::udp::{UdpConnection, UdpInner};
+use ftth_rsipstack::transport::{SipAddr, SipConnection, TransportLayer};
+use rsip::common::uri::{UriWithParams, UriWithParamsList, param::Tag};
 use rsip::headers::auth::{self, AuthQop, Qop};
 use rsip::headers::{
     CallId as HeaderCallId, Contact, ContentEncoding, ContentLength as HeaderContentLength,
@@ -39,138 +22,27 @@ use rsip::headers::{
 use rsip::message::headers_ext::HeadersExt;
 use rsip::typed;
 use rsip::{
-    Method, Param, Response, SipMessage, StatusCode, StatusCodeKind, Uri, Version,
+    Method, Param, Response, SipMessage, StatusCode, StatusCodeKind, Uri,
     host_with_port::HostWithPort, transport::Transport,
 };
+use socket2::{Domain, Protocol, Socket, Type};
+use tokio::net::UdpSocket;
+use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
+
+use crate::config::BindConfig;
+use crate::error::{Error, Result};
+use crate::media::{MediaSessionHandle, MediaSessionKey};
+use crate::net::bind_to_device;
+
+use super::builder::ShutdownSignal;
+use super::registrar::UpstreamRegistrar;
+use super::state::{
+    CallContext, InboundPendingInvite, OutboundPendingInvite, PendingInvite, SipContext,
+};
+use super::utils::{constant_time_eq, md5_hex, strip_rport_param};
+use crate::sip::registration::DownstreamRegistration;
 use tracing::{debug, error, info, warn};
-
-#[derive(Debug, Clone)]
-pub struct SipContext {
-    pub config: Arc<ProxyConfig>,
-    pub media: Arc<MediaRelay>,
-    pub registrations: Arc<RwLock<RegistrationCache>>,
-    pub sockets: Arc<ListenerSockets>,
-    pub calls: Arc<RwLock<HashMap<String, CallContext>>>,
-    pub route_set: Arc<RwLock<Vec<UriWithParams>>>,
-    auth: Arc<DownstreamAuthState>,
-    pending: Arc<RwLock<HashMap<String, PendingInvite>>>,
-}
-
-#[derive(Debug, Default)]
-pub struct ListenerSockets {
-    pub downstream: Mutex<Option<SocketAddr>>,
-    pub upstream: Mutex<Option<SocketAddr>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CallContext {
-    pub media: MediaSessionHandle,
-    pub media_key: MediaSessionKey,
-    pub upstream_target: SipAddr,
-    pub upstream_contact: Option<Uri>,
-    pub downstream_contact: Option<Uri>,
-    pub upstream_to_tag: Option<String>,
-    pub downstream_target: SipAddr,
-    pub identity: String,
-}
-
-#[derive(Clone)]
-enum PendingInvite {
-    Outbound(OutboundPendingInvite),
-    Inbound(InboundPendingInvite),
-}
-
-const DOWNSTREAM_NONCE_TTL: Duration = Duration::from_secs(300);
-
-#[derive(Debug)]
-struct DownstreamAuthState {
-    counter: AtomicU64,
-    nonces: Mutex<HashMap<String, Instant>>,
-}
-
-impl DownstreamAuthState {
-    fn new() -> Self {
-        Self {
-            counter: AtomicU64::new(1),
-            nonces: Mutex::new(HashMap::new()),
-        }
-    }
-
-    async fn issue_nonce(&self) -> String {
-        let seq = self.counter.fetch_add(1, Ordering::Relaxed);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0));
-        let raw = format!("{}:{}:{}", seq, now.as_nanos(), std::process::id());
-        let nonce = md5_hex(raw.as_bytes());
-
-        let mut guard = self.nonces.lock().await;
-        guard.retain(|_, issued| issued.elapsed() < DOWNSTREAM_NONCE_TTL);
-        guard.insert(nonce.clone(), Instant::now());
-        nonce
-    }
-
-    async fn is_valid(&self, nonce: &str) -> bool {
-        let mut guard = self.nonces.lock().await;
-        guard.retain(|_, issued| issued.elapsed() < DOWNSTREAM_NONCE_TTL);
-        guard.contains_key(nonce)
-    }
-
-    async fn invalidate(&self, nonce: &str) {
-        let mut guard = self.nonces.lock().await;
-        guard.remove(nonce);
-    }
-}
-
-#[derive(Clone)]
-struct OutboundPendingInvite {
-    downstream_tx: Arc<Mutex<Transaction>>,
-    media: MediaSessionHandle,
-    media_key: MediaSessionKey,
-    upstream_target: SipAddr,
-    downstream_contact: Option<Uri>,
-    cancel_token: CancellationToken,
-    endpoint: Arc<Endpoint>,
-    upstream_request: rsip::Request,
-    downstream_target: SipAddr,
-    identity: String,
-}
-
-#[derive(Clone)]
-struct InboundPendingInvite {
-    upstream_tx: Arc<Mutex<Transaction>>,
-    media: MediaSessionHandle,
-    media_key: MediaSessionKey,
-    downstream_target: SipAddr,
-    downstream_contact: Option<Uri>,
-    cancel_token: CancellationToken,
-    endpoint: Arc<Endpoint>,
-    downstream_request: rsip::Request,
-    identity: String,
-    upstream_request: rsip::Request,
-}
-
-impl std::fmt::Debug for PendingInvite {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PendingInvite::Outbound(invite) => f
-                .debug_struct("PendingInvite::Outbound")
-                .field("media_key", &invite.media_key)
-                .field("upstream_target", &invite.upstream_target)
-                .field("downstream_contact", &invite.downstream_contact)
-                .field("downstream_target", &invite.downstream_target)
-                .field("identity", &invite.identity)
-                .finish(),
-            PendingInvite::Inbound(invite) => f
-                .debug_struct("PendingInvite::Inbound")
-                .field("media_key", &invite.media_key)
-                .field("downstream_target", &invite.downstream_target)
-                .field("downstream_contact", &invite.downstream_contact)
-                .field("identity", &invite.identity)
-                .finish(),
-        }
-    }
-}
 
 #[derive(Debug, Default)]
 struct ProxyMessageInspector;
@@ -201,141 +73,6 @@ impl MessageInspector for ProxyMessageInspector {
 
     fn after_received(&self, msg: SipMessage) -> SipMessage {
         msg
-    }
-}
-
-pub struct FtthSipProxyBuilder<B = RsipstackBackend> {
-    config: ProxyConfig,
-    backend: B,
-}
-
-impl FtthSipProxyBuilder<RsipstackBackend> {
-    pub fn new(config: ProxyConfig) -> Self {
-        Self {
-            config,
-            backend: RsipstackBackend::default(),
-        }
-    }
-}
-
-impl<B> FtthSipProxyBuilder<B>
-where
-    B: SipBackend,
-{
-    pub fn with_backend(mut self, backend: B) -> Self {
-        self.backend = backend;
-        self
-    }
-
-    pub async fn build(self) -> Result<ProxyRuntime<B>> {
-        let media = MediaRelayBuilder::from_config(&self.config.media)?.build();
-        let context = SipContext {
-            config: Arc::new(self.config),
-            media: Arc::new(media),
-            registrations: Arc::new(RwLock::new(RegistrationCache::new())),
-            sockets: Arc::new(ListenerSockets::default()),
-            calls: Arc::new(RwLock::new(HashMap::new())),
-            route_set: Arc::new(RwLock::new(Vec::new())),
-            auth: Arc::new(DownstreamAuthState::new()),
-            pending: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        Ok(ProxyRuntime {
-            backend: Arc::new(self.backend),
-            context,
-        })
-    }
-}
-
-pub struct ProxyRuntime<B: SipBackend> {
-    backend: Arc<B>,
-    context: SipContext,
-}
-
-impl<B> ProxyRuntime<B>
-where
-    B: SipBackend,
-{
-    pub async fn start(self) -> Result<ProxyHandle> {
-        self.backend.initialize(&self.context).await?;
-
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let backend = self.backend.clone();
-        let context = self.context.clone();
-
-        let worker: JoinHandle<Result<()>> = tokio::task::spawn_blocking(move || {
-            let runtime = RuntimeBuilder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(Error::Transport)?;
-
-            let mut shutdown = ShutdownSignal::new(shutdown_rx);
-            runtime.block_on(async {
-                backend.run(context, &mut shutdown).await?;
-                backend.shutdown().await
-            })
-        });
-
-        Ok(ProxyHandle {
-            shutdown_tx,
-            worker,
-        })
-    }
-}
-
-pub struct ProxyHandle {
-    shutdown_tx: watch::Sender<bool>,
-    worker: JoinHandle<Result<()>>,
-}
-
-impl ProxyHandle {
-    pub fn signal_shutdown(&self) {
-        let _ = self.shutdown_tx.send(true);
-    }
-
-    pub async fn wait(self) -> Result<()> {
-        let Self {
-            shutdown_tx: _,
-            worker,
-        } = self;
-        match worker.await {
-            Ok(result) => result,
-            Err(join_error) => Err(Error::Media(format!("proxy task panicked: {join_error}"))),
-        }
-    }
-
-    pub async fn shutdown(self) -> Result<()> {
-        let Self {
-            shutdown_tx,
-            worker,
-        } = self;
-        let _ = shutdown_tx.send(true);
-        match worker.await {
-            Ok(result) => result,
-            Err(join_error) => Err(Error::Media(format!("proxy task panicked: {join_error}"))),
-        }
-    }
-}
-
-pub struct ShutdownSignal {
-    inner: watch::Receiver<bool>,
-}
-
-impl ShutdownSignal {
-    fn new(inner: watch::Receiver<bool>) -> Self {
-        Self { inner }
-    }
-
-    pub async fn recv(&mut self) {
-        if *self.inner.borrow() {
-            return;
-        }
-
-        while self.inner.changed().await.is_ok() {
-            if *self.inner.borrow() {
-                break;
-            }
-        }
     }
 }
 
@@ -505,627 +242,6 @@ impl SipBackend for RsipstackBackend {
         Ok(())
     }
 }
-
-pub type FtthSipProxy = ProxyRuntime<RsipstackBackend>;
-
-struct UpstreamRegistrar {
-    context: SipContext,
-    endpoint: Arc<Endpoint>,
-    shutdown: CancellationToken,
-    call_id: rsip::headers::CallId,
-    cseq: AtomicU32,
-    nonce_count: AtomicU32,
-    challenge: RwLock<Option<DigestChallenge>>,
-    wake: Notify,
-}
-
-#[derive(Clone, Debug)]
-struct DigestChallenge {
-    realm: String,
-    nonce: String,
-    opaque: Option<String>,
-    algorithm: Option<auth::Algorithm>,
-    qop: Option<Qop>,
-}
-
-impl UpstreamRegistrar {
-    fn new(context: SipContext, endpoint: Arc<Endpoint>, shutdown: CancellationToken) -> Arc<Self> {
-        Arc::new(Self {
-            context,
-            endpoint,
-            shutdown,
-            call_id: rsip::headers::CallId::default(),
-            cseq: AtomicU32::new(1),
-            nonce_count: AtomicU32::new(0),
-            challenge: RwLock::new(None),
-            wake: Notify::new(),
-        })
-    }
-
-    async fn run(self: Arc<Self>) {
-        info!("starting upstream registrar");
-        let mut backoff = Duration::from_secs(1);
-
-        loop {
-            tokio::select! {
-                _ = self.shutdown.cancelled() => {
-                    info!("upstream registrar shutdown requested");
-                    break;
-                }
-                _ = self.wake.notified() => {
-                    debug!("upstream registrar wake received");
-                    continue;
-                }
-                result = self.register_once() => {
-                    match result {
-                        Ok(next_refresh) => {
-                            backoff = Duration::from_secs(1);
-                            tokio::select! {
-                                _ = self.shutdown.cancelled() => {
-                                    info!("upstream registrar shutdown requested");
-                                    break;
-                                }
-                                _ = self.wake.notified() => {
-                                    debug!("upstream registrar refresh triggered early");
-                                    continue;
-                                }
-                                _ = tokio::time::sleep(next_refresh) => {}
-                            }
-                        }
-                        Err(err) => {
-                            warn!(error = %err, "upstream REGISTER failed");
-                            let wait = backoff;
-                            backoff = (backoff * 2).min(Duration::from_secs(300));
-                            tokio::select! {
-                                _ = self.shutdown.cancelled() => {
-                                    info!("upstream registrar shutdown requested");
-                                    break;
-                                }
-                                _ = self.wake.notified() => {
-                                    debug!("upstream registrar retry triggered early");
-                                    backoff = Duration::from_secs(1);
-                                    continue;
-                                }
-                                _ = tokio::time::sleep(wait) => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        info!("upstream registrar stopped");
-    }
-
-    fn trigger(&self) {
-        self.wake.notify_one();
-    }
-
-    async fn register_once(self: &Arc<Self>) -> Result<Duration> {
-        let expires_hint = self.context.config.timers.registration_refresh_secs;
-        let mut needs_auth_retry = self.challenge.read().await.is_some();
-        let mut attempts = 0u8;
-
-        loop {
-            let request = self
-                .prepare_register_request(expires_hint, needs_auth_retry)
-                .await?;
-
-            let target = RsipstackBackend::build_trunk_target(&self.context.config.upstream);
-            let mut tx = self
-                .start_client_transaction(request.clone(), target)
-                .await?;
-
-            while let Some(message) = tx.receive().await {
-                if let SipMessage::Response(mut response) = message {
-                    RsipstackBackend::expand_compact_headers(&mut response.headers);
-                    debug!(status = %response.status_code, "received upstream REGISTER response");
-                    match response.status_code {
-                        StatusCode::OK => {
-                            self.update_route_set_from_response(&response).await;
-                            let refresh = self.schedule_from_response(&response, expires_hint)?;
-                            self.nonce_count.store(0, Ordering::SeqCst);
-                            return Ok(refresh);
-                        }
-                        StatusCode::Unauthorized | StatusCode::ProxyAuthenticationRequired => {
-                            attempts = attempts.saturating_add(1);
-                            if attempts > 3 {
-                                return Err(Error::sip_stack(
-                                    "too many authentication attempts for REGISTER",
-                                ));
-                            }
-
-                            let challenge_header = match response.status_code {
-                                StatusCode::Unauthorized => response
-                                    .headers
-                                    .iter()
-                                    .find_map(|header| match header {
-                                        rsip::Header::WwwAuthenticate(value) => Some(value.clone()),
-                                        _ => None,
-                                    })
-                                    .ok_or_else(|| Error::sip_stack("missing WWW-Authenticate"))?,
-                                StatusCode::ProxyAuthenticationRequired => response
-                                    .headers
-                                    .iter()
-                                    .find_map(|header| match header {
-                                        rsip::Header::ProxyAuthenticate(value) => {
-                                            Some(rsip::headers::WwwAuthenticate::new(
-                                                value.value().to_string(),
-                                            ))
-                                        }
-                                        _ => None,
-                                    })
-                                    .ok_or_else(|| {
-                                        Error::sip_stack("missing Proxy-Authenticate header")
-                                    })?,
-                                _ => unreachable!(),
-                            };
-
-                            let typed = challenge_header.typed().map_err(Error::sip_stack)?;
-                            self.store_challenge(&typed).await?;
-                            needs_auth_retry = true;
-                            break;
-                        }
-                        StatusCode::IntervalTooBrief => {
-                            let retry_after = response
-                                .headers
-                                .iter()
-                                .find_map(|header| match header {
-                                    rsip::Header::MinExpires(value) => {
-                                        value.seconds().ok().map(|seconds| seconds as u64)
-                                    }
-                                    _ => None,
-                                })
-                                .unwrap_or(expires_hint);
-                            warn!(min_expires = retry_after, "upstream registrar received 423");
-                            return Ok(Duration::from_secs(retry_after.max(1)));
-                        }
-                        other => {
-                            return Err(Error::sip_stack(format!(
-                                "unexpected REGISTER response status {other}"
-                            )));
-                        }
-                    }
-                }
-            }
-
-            if !needs_auth_retry {
-                // No response received; propagate error so caller can back off
-                return Err(Error::sip_stack("no valid response to REGISTER"));
-            }
-        }
-    }
-
-    async fn prepare_register_request(
-        self: &Arc<Self>,
-        expires_hint: u64,
-        include_authorization: bool,
-    ) -> Result<rsip::Request> {
-        let config = &self.context.config.upstream;
-        let registrar_uri =
-            Uri::try_from(config.registrar_uri.as_str()).map_err(Error::sip_stack)?;
-
-        let local_socket = {
-            let guard = self.context.sockets.upstream.lock().await;
-            guard.unwrap_or_else(|| self.context.config.upstream.bind.socket_addr())
-        };
-
-        let identity = if config.default_identity.is_empty() {
-            return Err(Error::configuration(
-                "upstream default identity must be configured",
-            ));
-        } else {
-            config.default_identity.clone()
-        };
-
-        let address_literal = format_socket_for_sip(&local_socket);
-        let contact_uri = format!("sip:{}@{}", identity, address_literal);
-
-        #[allow(unused_mut)]
-        let mut request = rsip::Request {
-            method: Method::Register,
-            uri: registrar_uri.clone(),
-            version: Version::default(),
-            headers: rsip::Headers::default(),
-            body: Vec::new(),
-        };
-
-        let mut via_addr: SipAddr = local_socket.into();
-        via_addr.r#type = Some(Transport::Udp);
-        let mut via = self
-            .endpoint
-            .inner
-            .get_via(Some(via_addr), None)
-            .map_err(Error::sip_stack)?;
-        strip_rport_param(&mut via);
-        request.headers.unique_push(rsip::Header::Via(via.into()));
-        request
-            .headers
-            .unique_push(rsip::Header::MaxForwards(rsip::headers::MaxForwards::from(
-                70u32,
-            )));
-
-        let user_uri = format!("sip:{}@{}", identity, config.sip_domain);
-        let user_uri = Uri::try_from(user_uri.as_str()).map_err(Error::sip_stack)?;
-
-        let from_tag = Tag::default();
-        let from_header = typed::From {
-            display_name: None,
-            uri: user_uri.clone(),
-            params: vec![Param::Tag(from_tag.clone())],
-        };
-        request
-            .headers
-            .unique_push(rsip::Header::From(from_header.into()));
-
-        let to_header = typed::To {
-            display_name: None,
-            uri: user_uri.clone(),
-            params: Vec::new(),
-        };
-        request
-            .headers
-            .unique_push(rsip::Header::To(to_header.into()));
-
-        request
-            .headers
-            .unique_push(rsip::Header::CallId(self.call_id.clone()));
-
-        let seq = self.cseq.fetch_add(1, Ordering::SeqCst);
-        let cseq = typed::CSeq {
-            seq,
-            method: Method::Register,
-        };
-        request.headers.unique_push(rsip::Header::CSeq(cseq.into()));
-
-        request
-            .headers
-            .unique_push(rsip::Header::Contact(Contact::from(format!(
-                "<{}>",
-                contact_uri
-            ))));
-
-        request
-            .headers
-            .unique_push(rsip::Header::Expires(rsip::headers::Expires::from(
-                expires_hint as u32,
-            )));
-
-        if include_authorization && self.context.config.upstream.auth.is_none() {
-            return Err(Error::configuration(
-                "upstream authentication required but credentials missing",
-            ));
-        }
-
-        if include_authorization {
-            if let Some(authorization) = self.build_authorization(&request).await? {
-                request
-                    .headers
-                    .unique_push(rsip::Header::Authorization(authorization.into()));
-            }
-        }
-
-        request.headers.unique_push(rsip::Header::ContentLength(
-            rsip::headers::ContentLength::from(0u32),
-        ));
-
-        Ok(request)
-    }
-
-    fn schedule_from_response(&self, response: &rsip::Response, fallback: u64) -> Result<Duration> {
-        let expires = response
-            .expires_header()
-            .and_then(|header| header.seconds().ok().map(|value| value as u64))
-            .unwrap_or(fallback);
-
-        let refresh_secs = if expires > 30 {
-            expires - 10
-        } else if expires > 5 {
-            ((expires as f64) * 0.8).round() as u64
-        } else {
-            1
-        };
-
-        Ok(Duration::from_secs(refresh_secs.max(1)))
-    }
-
-    async fn update_route_set_from_response(&self, response: &rsip::Response) {
-        let routes = Self::extract_route_set(response);
-        let mut guard = self.context.route_set.write().await;
-        *guard = routes;
-    }
-
-    fn extract_route_set(response: &rsip::Response) -> Vec<UriWithParams> {
-        let mut routes = Vec::new();
-
-        for header in response.headers.iter() {
-            match header {
-                rsip::Header::Other(name, value)
-                    if name.eq_ignore_ascii_case("Path")
-                        || name.eq_ignore_ascii_case("Service-Route") =>
-                {
-                    let route_header = rsip::headers::Route::from(value.clone());
-                    match route_header.typed() {
-                        Ok(list) => routes.extend(list.uris().iter().cloned()),
-                        Err(err) => {
-                            warn!(header = %name, error = %err, "failed to parse route set entry")
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        routes
-    }
-
-    async fn store_challenge(&self, challenge: &rsip::typed::WwwAuthenticate) -> Result<()> {
-        let algorithm_value = challenge.algorithm;
-        if let Some(algorithm) = algorithm_value {
-            if !matches!(algorithm, auth::Algorithm::Md5 | auth::Algorithm::Md5Sess) {
-                return Err(Error::configuration(format!(
-                    "unsupported digest algorithm {:?}",
-                    algorithm
-                )));
-            }
-        }
-
-        let qop_value = challenge.qop.clone();
-        if let Some(qop) = qop_value.as_ref() {
-            if !matches!(qop, Qop::Auth) {
-                return Err(Error::configuration(format!(
-                    "unsupported digest qop {:?}",
-                    qop
-                )));
-            }
-        }
-
-        let digest = DigestChallenge {
-            realm: challenge.realm.clone(),
-            nonce: challenge.nonce.clone(),
-            opaque: challenge.opaque.clone(),
-            algorithm: algorithm_value,
-            qop: qop_value,
-        };
-
-        let mut guard = self.challenge.write().await;
-        *guard = Some(digest);
-        Ok(())
-    }
-
-    async fn build_authorization(
-        &self,
-        request: &rsip::Request,
-    ) -> Result<Option<rsip::typed::Authorization>> {
-        let credentials = match &self.context.config.upstream.auth {
-            Some(auth) => auth.clone(),
-            None => return Ok(None),
-        };
-
-        let challenge = {
-            let guard = self.challenge.read().await;
-            guard
-                .as_ref()
-                .cloned()
-                .ok_or_else(|| Error::configuration("authentication challenge not available"))?
-        };
-
-        let algorithm = challenge.algorithm.unwrap_or(auth::Algorithm::Md5);
-        let method = request.method.to_string();
-        let uri_string = request.uri.to_string();
-
-        let nonce_count = self.nonce_count.fetch_add(1, Ordering::SeqCst) + 1;
-        let nc_value = (nonce_count % 100_000_000).max(1);
-
-        let (qop, cnonce, qop_token) = match challenge.qop.clone() {
-            Some(Qop::Auth) => {
-                let cnonce = generate_cnonce();
-                let nc_u8 = ((nc_value - 1) % 255 + 1) as u8;
-                (
-                    Some(AuthQop::Auth {
-                        cnonce: cnonce.clone(),
-                        nc: nc_u8,
-                    }),
-                    Some(cnonce),
-                    Some("auth"),
-                )
-            }
-            Some(other) => {
-                return Err(Error::configuration(format!(
-                    "unsupported digest qop {:?}",
-                    other
-                )));
-            }
-            None => (None, None, None),
-        };
-
-        let ha1_base = format!(
-            "{}:{}:{}",
-            credentials.username, challenge.realm, credentials.password
-        );
-        let ha1 = match algorithm {
-            auth::Algorithm::Md5 => md5_hex(ha1_base.as_bytes()),
-            auth::Algorithm::Md5Sess => {
-                let base = md5_hex(ha1_base.as_bytes());
-                let cnonce = cnonce
-                    .as_ref()
-                    .ok_or_else(|| Error::configuration("cnonce required for MD5-sess"))?;
-                md5_hex(format!("{}:{}:{}", base, challenge.nonce, cnonce).as_bytes())
-            }
-            other => {
-                return Err(Error::configuration(format!(
-                    "unsupported digest algorithm {:?}",
-                    other
-                )));
-            }
-        };
-
-        let ha2 = md5_hex(format!("{}:{}", method, uri_string).as_bytes());
-        let response = if let (Some(token), Some(cnonce)) = (qop_token, cnonce.as_ref()) {
-            let nc_formatted = format!("{:08}", nc_value);
-            md5_hex(
-                format!(
-                    "{}:{}:{}:{}:{}:{}",
-                    ha1, challenge.nonce, nc_formatted, cnonce, token, ha2
-                )
-                .as_bytes(),
-            )
-        } else {
-            md5_hex(format!("{}:{}:{}", ha1, challenge.nonce, ha2).as_bytes())
-        };
-
-        let authorization = rsip::typed::Authorization {
-            scheme: auth::Scheme::Digest,
-            username: credentials.username,
-            realm: challenge.realm,
-            nonce: challenge.nonce,
-            uri: request.uri.clone(),
-            response,
-            algorithm: Some(algorithm),
-            opaque: challenge.opaque,
-            qop,
-        };
-
-        Ok(Some(authorization))
-    }
-
-    async fn start_client_transaction(
-        &self,
-        request: rsip::Request,
-        target: SipAddr,
-    ) -> Result<Transaction> {
-        let key = TransactionKey::from_request(&request, TransactionRole::Client)
-            .map_err(Error::sip_stack)?;
-        let mut tx = Transaction::new_client(key, request, self.endpoint.inner.clone(), None);
-        tx.destination = Some(target);
-        tx.send().await.map_err(Error::sip_stack)?;
-        Ok(tx)
-    }
-}
-
-fn format_socket_for_sip(addr: &SocketAddr) -> String {
-    match addr.ip() {
-        IpAddr::V6(ipv6) => format!("[{}]:{}", ipv6, addr.port()),
-        IpAddr::V4(ipv4) => format!("{}:{}", ipv4, addr.port()),
-    }
-}
-
-fn strip_rport_param(via: &mut typed::Via) {
-    via.params.retain(|param| {
-        if let Param::Other(name, _) = param {
-            !name.value().eq_ignore_ascii_case("rport")
-        } else {
-            true
-        }
-    });
-}
-
-fn downstream_realm(context: &SipContext) -> String {
-    context
-        .config
-        .downstream
-        .user_agent
-        .realm
-        .clone()
-        .unwrap_or_else(|| context.config.upstream.sip_domain.clone())
-}
-
-fn md5_hex(bytes: &[u8]) -> String {
-    format!("{:032x}", md5::compute(bytes))
-}
-
-fn generate_cnonce() -> String {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_else(|_| Duration::from_secs(0));
-    format!("{:x}", now.as_nanos())
-}
-
-fn constant_time_eq(lhs: &[u8], rhs: &[u8]) -> bool {
-    if lhs.len() != rhs.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (a, b) in lhs.iter().zip(rhs.iter()) {
-        diff |= a ^ b;
-    }
-    diff == 0
-}
-
-async fn create_udp_listener(
-    bind: &BindConfig,
-    cancel_token: CancellationToken,
-) -> Result<(UdpConnection, SocketAddr, SocketAddr)> {
-    let socket = Socket::new(
-        Domain::for_address(bind.socket_addr()),
-        Type::DGRAM,
-        Some(Protocol::UDP),
-    )
-    .map_err(Error::Transport)?;
-    socket.set_reuse_address(true).map_err(Error::Transport)?;
-
-    if let Some(interface) = &bind.interface {
-        if let Err(err) = bind_to_device(&socket, interface) {
-            return Err(match err {
-                Error::Transport(io_err) => Error::Transport(io_err),
-                Error::Media(msg) => {
-                    Error::Transport(std::io::Error::new(std::io::ErrorKind::Other, msg))
-                }
-                other => other,
-            });
-        }
-    }
-
-    socket
-        .bind(&bind.socket_addr().into())
-        .map_err(Error::Transport)?;
-    socket.set_nonblocking(true).map_err(Error::Transport)?;
-
-    let std_socket: std::net::UdpSocket = socket.into();
-    std_socket.set_nonblocking(true).map_err(Error::Transport)?;
-
-    let udp_socket = UdpSocket::from_std(std_socket).map_err(Error::Transport)?;
-    let local_addr = udp_socket.local_addr().map_err(Error::Transport)?;
-
-    let chosen_port = if bind.port == 0 {
-        local_addr.port()
-    } else {
-        bind.port
-    };
-    let canonical_addr = if bind.address.is_unspecified() {
-        SocketAddr::new(local_addr.ip(), chosen_port)
-    } else {
-        SocketAddr::new(bind.address, chosen_port)
-    };
-
-    let resolved_addr = if bind.address.is_unspecified() {
-        SipConnection::resolve_bind_address(canonical_addr)
-    } else {
-        canonical_addr
-    };
-
-    let mut sip_addr: SipAddr = resolved_addr.into();
-    sip_addr.r#type = Some(rsip::transport::Transport::Udp);
-
-    let connection = UdpConnection::attach(
-        UdpInner {
-            conn: udp_socket,
-            addr: sip_addr,
-        },
-        None,
-        Some(cancel_token),
-    )
-    .await;
-
-    Ok((connection, local_addr, canonical_addr))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TransactionDirection {
-    Downstream,
-    Upstream,
-}
-
 impl RsipstackBackend {
     fn select_identity(
         request: &rsip::Request,
@@ -1332,7 +448,7 @@ impl RsipstackBackend {
         }
     }
 
-    fn build_trunk_target(upstream_config: &crate::config::UpstreamConfig) -> SipAddr {
+    pub(super) fn build_trunk_target(upstream_config: &crate::config::UpstreamConfig) -> SipAddr {
         let socket = SocketAddr::new(upstream_config.trunk_addr, upstream_config.trunk_port);
         let mut target: SipAddr = socket.into();
         target.r#type = Some(Transport::Udp);
@@ -1559,7 +675,7 @@ impl RsipstackBackend {
         Ok(true)
     }
 
-    fn expand_compact_headers(headers: &mut rsip::Headers) {
+    pub(super) fn expand_compact_headers(headers: &mut rsip::Headers) {
         use std::mem;
 
         let mut collected: Vec<rsip::Header> = mem::take(headers).into();
@@ -3474,4 +2590,88 @@ fn resolve_remote_from_via(via: &rsip::headers::Via) -> Result<SocketAddr, Strin
     };
 
     Ok(SocketAddr::new(ip, port))
+}
+
+fn downstream_realm(context: &SipContext) -> String {
+    context
+        .config
+        .downstream
+        .user_agent
+        .realm
+        .clone()
+        .unwrap_or_else(|| context.config.upstream.sip_domain.clone())
+}
+
+async fn create_udp_listener(
+    bind: &BindConfig,
+    cancel_token: CancellationToken,
+) -> Result<(UdpConnection, SocketAddr, SocketAddr)> {
+    let socket = Socket::new(
+        Domain::for_address(bind.socket_addr()),
+        Type::DGRAM,
+        Some(Protocol::UDP),
+    )
+    .map_err(Error::Transport)?;
+    socket.set_reuse_address(true).map_err(Error::Transport)?;
+
+    if let Some(interface) = &bind.interface {
+        if let Err(err) = bind_to_device(&socket, interface) {
+            return Err(match err {
+                Error::Transport(io_err) => Error::Transport(io_err),
+                Error::Media(msg) => {
+                    Error::Transport(std::io::Error::new(std::io::ErrorKind::Other, msg))
+                }
+                other => other,
+            });
+        }
+    }
+
+    socket
+        .bind(&bind.socket_addr().into())
+        .map_err(Error::Transport)?;
+    socket.set_nonblocking(true).map_err(Error::Transport)?;
+
+    let std_socket: std::net::UdpSocket = socket.into();
+    std_socket.set_nonblocking(true).map_err(Error::Transport)?;
+
+    let udp_socket = UdpSocket::from_std(std_socket).map_err(Error::Transport)?;
+    let local_addr = udp_socket.local_addr().map_err(Error::Transport)?;
+
+    let chosen_port = if bind.port == 0 {
+        local_addr.port()
+    } else {
+        bind.port
+    };
+    let canonical_addr = if bind.address.is_unspecified() {
+        SocketAddr::new(local_addr.ip(), chosen_port)
+    } else {
+        SocketAddr::new(bind.address, chosen_port)
+    };
+
+    let resolved_addr = if bind.address.is_unspecified() {
+        SipConnection::resolve_bind_address(canonical_addr)
+    } else {
+        canonical_addr
+    };
+
+    let mut sip_addr: SipAddr = resolved_addr.into();
+    sip_addr.r#type = Some(rsip::transport::Transport::Udp);
+
+    let connection = UdpConnection::attach(
+        UdpInner {
+            conn: udp_socket,
+            addr: sip_addr,
+        },
+        None,
+        Some(cancel_token),
+    )
+    .await;
+
+    Ok((connection, local_addr, canonical_addr))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionDirection {
+    Downstream,
+    Upstream,
 }
