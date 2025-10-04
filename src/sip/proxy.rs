@@ -12,7 +12,7 @@ use ftth_rsipstack::transport::{SipAddr, SipConnection, TransportLayer};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::runtime::Builder as RuntimeBuilder;
-use tokio::sync::{watch, Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -1042,7 +1042,13 @@ async fn create_udp_listener(
     let udp_socket = UdpSocket::from_std(std_socket).map_err(Error::Transport)?;
     let local_addr = udp_socket.local_addr().map_err(Error::Transport)?;
 
-    let resolved = SipConnection::resolve_bind_address(local_addr);
+    let canonical_addr = if bind.address.is_unspecified() {
+        local_addr
+    } else {
+        SocketAddr::new(bind.address, local_addr.port())
+    };
+
+    let resolved = SipConnection::resolve_bind_address(canonical_addr);
     let mut sip_addr: SipAddr = resolved.into();
     sip_addr.r#type = Some(rsip::transport::Transport::Udp);
 
@@ -1145,7 +1151,12 @@ impl RsipstackBackend {
             HostWithPort::try_from(host_input.as_str()).map_err(Error::sip_stack)?;
         request.uri.host_with_port = host_with_port;
 
-        let mut via_addr: SipAddr = upstream_listener.into();
+        let via_ip = if upstream_config.bind.address.is_unspecified() {
+            upstream_listener.ip()
+        } else {
+            upstream_config.bind.address
+        };
+        let mut via_addr: SipAddr = SocketAddr::new(via_ip, upstream_listener.port()).into();
         via_addr.r#type = Some(Transport::Udp);
         let via = endpoint
             .inner
@@ -1176,9 +1187,14 @@ impl RsipstackBackend {
             request.headers.unique_push(rsip::Header::From(from.into()));
         }
 
+        let contact_ip = if upstream_config.bind.address.is_unspecified() {
+            via_ip
+        } else {
+            upstream_config.bind.address
+        };
         let identity_contact = format!(
             "sip:{}@{}:{}",
-            identity, upstream_config.bind.address, upstream_config.bind.port
+            identity, contact_ip, upstream_config.bind.port
         );
         let contact_uri = Uri::try_from(identity_contact.as_str()).map_err(Error::sip_stack)?;
         let contact_header = Contact::from(format!("<{}>", contact_uri));
