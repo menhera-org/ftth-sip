@@ -426,16 +426,24 @@ impl RsipstackBackend {
             .unique_push(rsip::Header::Contact(contact_header));
 
         if request.method == Method::Invite {
-            let p_preferred = downstream_preferred_identity
-                .map(|value| {
+            let preferred_user = downstream_preferred_identity
+                .and_then(|value| {
                     let trimmed = value.trim();
                     if trimmed.is_empty() {
-                        None
+                        return None;
+                    }
+
+                    let without_brackets = trimmed.trim_matches(|c| c == '<' || c == '>');
+
+                    if without_brackets.starts_with("tel:") {
+                        let user = without_brackets.trim_start_matches("tel:").trim();
+                        if user.is_empty() {
+                            None
+                        } else {
+                            Some(user.to_string())
+                        }
                     } else {
-                        let without_brackets = trimmed.trim_matches(|c| c == '<' || c == '>');
-                        let normalized = if without_brackets.starts_with("sip:") {
-                            without_brackets.to_string()
-                        } else if without_brackets.starts_with("tel:") {
+                        let candidate = if without_brackets.starts_with("sip:") {
                             without_brackets.to_string()
                         } else if without_brackets.contains('@') {
                             format!("sip:{}", without_brackets)
@@ -443,24 +451,15 @@ impl RsipstackBackend {
                             format!("sip:{}@{}", without_brackets, upstream_config.sip_domain)
                         };
 
-                        let mut user = if normalized.starts_with("tel:") {
-                            normalized.trim_start_matches("tel:").to_string()
-                        } else {
-                            Uri::try_from(normalized.as_str())
-                                .ok()
-                                .and_then(|uri| uri.auth.map(|auth| auth.user))
-                                .unwrap_or_default()
-                        };
-
-                        if user.is_empty() {
-                            user = identity.to_string();
-                        }
-
-                        Some(format!("<sip:{}@{}>", user, upstream_config.sip_domain))
+                        Uri::try_from(candidate.as_str())
+                            .ok()
+                            .and_then(|uri| uri.auth.map(|auth| auth.user))
                     }
                 })
-                .flatten()
-                .unwrap_or_else(|| format!("<{}>", identity_uri_string));
+                .filter(|user| !user.is_empty())
+                .unwrap_or_else(|| identity.to_string());
+
+            let p_preferred = format!("<sip:{}@{}>", preferred_user, upstream_config.sip_domain);
 
             request.headers.push(rsip::Header::Other(
                 "P-Preferred-Identity".into(),
