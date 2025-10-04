@@ -377,15 +377,15 @@ impl SipBackend for RsipstackBackend {
         let cancel = CancellationToken::new();
         let transport_layer = TransportLayer::new(cancel.clone());
 
-        let (downstream_conn, _downstream_addr, downstream_canonical) =
-            create_udp_listener(&context.config.downstream.bind, cancel.child_token()).await?;
-        transport_layer.add_transport(downstream_conn.into());
-        *context.sockets.downstream.lock().await = Some(downstream_canonical);
-
         let (upstream_conn, _upstream_addr, upstream_canonical) =
             create_udp_listener(&context.config.upstream.bind, cancel.child_token()).await?;
         transport_layer.add_transport(upstream_conn.into());
         *context.sockets.upstream.lock().await = Some(upstream_canonical);
+
+        let (downstream_conn, _downstream_addr, downstream_canonical) =
+            create_udp_listener(&context.config.downstream.bind, cancel.child_token()).await?;
+        transport_layer.add_transport(downstream_conn.into());
+        *context.sockets.downstream.lock().await = Some(downstream_canonical);
 
         let mut endpoint_builder = EndpointBuilder::new();
         endpoint_builder
