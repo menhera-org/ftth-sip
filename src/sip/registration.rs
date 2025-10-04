@@ -1,11 +1,13 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use ftth_rsipstack::rsip::typed;
+
 use crate::config::AllowedUserAgent;
 
 #[derive(Debug, Clone)]
 pub struct DownstreamRegistration {
-    pub contact_uri: String,
+    pub contact: typed::Contact,
     pub registered_at: Instant,
     pub expires_in: Duration,
     pub source: SocketAddr,

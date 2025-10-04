@@ -31,7 +31,9 @@ use ftth_rsipstack::transaction::transaction::Transaction;
 use rsip::common::uri::param::Tag;
 use rsip::headers::auth::{self, AuthQop, Qop};
 use rsip::headers::{
-    CallId as HeaderCallId, Contact, ContentEncoding, ContentLength as HeaderContentLength, ContentType, From as HeaderFrom, Subject, Supported, To as HeaderTo, ToTypedHeader, UntypedHeader, Via as HeaderVia
+    CallId as HeaderCallId, Contact, ContentEncoding, ContentLength as HeaderContentLength,
+    ContentType, From as HeaderFrom, Subject, Supported, To as HeaderTo, ToTypedHeader,
+    UntypedHeader, Via as HeaderVia,
 };
 use rsip::message::headers_ext::HeadersExt;
 use rsip::typed;
@@ -1492,8 +1494,12 @@ impl RsipstackBackend {
             "l" => Some(rsip::Header::ContentLength(HeaderContentLength::new(
                 value.to_string(),
             ))),
-            "c" => Some(rsip::Header::ContentType(ContentType::new(value.to_string()))),
-            "e" => Some(rsip::Header::ContentEncoding(ContentEncoding::new(value.to_string()))),
+            "c" => Some(rsip::Header::ContentType(ContentType::new(
+                value.to_string(),
+            ))),
+            "e" => Some(rsip::Header::ContentEncoding(ContentEncoding::new(
+                value.to_string(),
+            ))),
             "k" => Some(rsip::Header::Supported(Supported::new(value.to_string()))),
             "s" => Some(rsip::Header::Subject(Subject::new(value.to_string()))),
             _ => None,
@@ -2358,17 +2364,18 @@ impl RsipstackBackend {
             return Ok(());
         }
 
-        let contact_header = tx
+        let contact = tx
             .original
             .contact_header()
             .map_err(Error::sip_stack)?
-            .clone();
+            .typed()
+            .map_err(Error::sip_stack)?;
 
         let via_header = tx.original.via_header().map_err(Error::sip_stack)?;
         let remote_addr = resolve_remote_from_via(via_header).map_err(Error::Media)?;
 
         let registration = DownstreamRegistration {
-            contact_uri: contact_header.to_string(),
+            contact,
             registered_at: Instant::now(),
             expires_in: Duration::from_secs(expires_secs),
             source: remote_addr,
@@ -2403,10 +2410,9 @@ impl RsipstackBackend {
 
         if direction == TransactionDirection::Downstream {
             if let Some(registration) = context.registrations.read().await.get() {
-                headers.push(rsip::Header::Other(
-                    "Contact".into(),
-                    registration.contact_uri.clone(),
-                ));
+                headers.push(rsip::Header::Contact(Contact::from(
+                    registration.contact.to_string(),
+                )));
             }
         }
 
@@ -2626,7 +2632,7 @@ impl RsipstackBackend {
                     }
                 };
 
-                let downstream_contact = Uri::try_from(registration.contact_uri.as_str()).ok();
+                let downstream_contact = Some(registration.contact.uri.clone());
                 let downstream_target = downstream_contact
                     .as_ref()
                     .and_then(|uri| Self::sip_addr_from_uri(uri).ok())

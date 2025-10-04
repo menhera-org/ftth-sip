@@ -160,7 +160,7 @@ impl Cli {
 
         let upstream_auth = match (self.upstream_auth_username, self.upstream_auth_password) {
             (Some(username), Some(password)) => Some(UpstreamAuth { username, password }),
-            (None, None) => None,
+            (Option::None, Option::None) => None,
             _ => {
                 return Err(anyhow!(
                     "both --upstream-auth-username and --upstream-auth-password must be provided"
