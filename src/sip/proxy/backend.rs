@@ -1251,6 +1251,19 @@ impl RsipstackBackend {
         }
     }
 
+    fn strip_own_via(headers: &mut rsip::Headers) {
+        use std::mem;
+
+        let mut collected: Vec<rsip::Header> = mem::take(headers).into();
+        if let Some(index) = collected
+            .iter()
+            .position(|header| matches!(header, rsip::Header::Via(_)))
+        {
+            collected.remove(index);
+        }
+        *headers = collected.into();
+    }
+
     async fn forward_upstream_responses(
         &self,
         mut client_tx: Transaction,
@@ -1270,6 +1283,7 @@ impl RsipstackBackend {
                     match maybe_message {
                         Some(SipMessage::Response(mut upstream_response)) => {
                             Self::expand_compact_headers(&mut upstream_response.headers);
+                            Self::strip_own_via(&mut upstream_response.headers);
                             if !upstream_response.body.is_empty() {
                                 if let Ok(body) = String::from_utf8(upstream_response.body.clone()) {
                                     let rewrite = media_session.rewrite_for_downstream(&body)?;
@@ -1337,6 +1351,7 @@ impl RsipstackBackend {
                     match maybe_message {
                         Some(SipMessage::Response(mut downstream_response)) => {
                             Self::expand_compact_headers(&mut downstream_response.headers);
+                            Self::strip_own_via(&mut downstream_response.headers);
                             if !downstream_response.body.is_empty() {
                                 if let Ok(body) = String::from_utf8(downstream_response.body.clone()) {
                                     let rewrite = media_session.rewrite_for_upstream(&body)?;
