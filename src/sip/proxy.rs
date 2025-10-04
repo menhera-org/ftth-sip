@@ -1165,6 +1165,7 @@ impl RsipstackBackend {
         let host_with_port =
             HostWithPort::try_from(host_input.as_str()).map_err(Error::sip_stack)?;
         request.uri.host_with_port = host_with_port;
+        let to_host_with_port = request.uri.host_with_port.clone();
 
         let via_ip = if upstream_config.bind.address.is_unspecified() {
             upstream_listener.ip()
@@ -1203,6 +1204,17 @@ impl RsipstackBackend {
         request
             .headers
             .unique_push(rsip::Header::From(typed_from.into()));
+
+        if let Some(mut typed_to) = original
+            .to_header()
+            .ok()
+            .and_then(|header| header.typed().ok())
+        {
+            typed_to.uri.host_with_port = to_host_with_port;
+            request
+                .headers
+                .unique_push(rsip::Header::To(typed_to.into()));
+        }
 
         let contact_ip = if upstream_config.bind.address.is_unspecified() {
             via_ip
