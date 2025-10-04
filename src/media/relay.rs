@@ -345,13 +345,36 @@ impl MediaSession {
                         };
 
                         let expected = expected_source.read().await.clone();
+                        let mut accept_packet = true;
                         if let Some(expected_src) = expected {
                             if src != expected_src {
-                                tracing::trace!(?key, label, %src, "ignoring packet from unexpected source");
-                                continue;
+                                if src.ip() == expected_src.ip() {
+                                    tracing::debug!(
+                                        ?key,
+                                        label,
+                                        %expected_src,
+                                        %src,
+                                        "updating expected media source to new port"
+                                    );
+                                    let mut guard = expected_source.write().await;
+                                    *guard = Some(src);
+                                } else {
+                                    tracing::trace!(
+                                        ?key,
+                                        label,
+                                        %src,
+                                        %expected_src,
+                                        "ignoring packet from unexpected source"
+                                    );
+                                    accept_packet = false;
+                                }
                             }
                         } else {
-                            tracing::trace!(?key, label, %src, "source not configured yet");
+                            tracing::debug!(?key, label, %src, "locking on first media source");
+                            let mut guard = expected_source.write().await;
+                            *guard = Some(src);
+                        }
+                        if !accept_packet {
                             continue;
                         }
 
@@ -531,7 +554,7 @@ fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16, force_pcmu: bool) -> R
                 .ok_or_else(|| Error::Media("missing transport protocol in m=audio".into()))?;
             let mut payloads: Vec<&str> = parts.collect();
             if force_pcmu {
-                payloads.retain(|fmt| *fmt == "0");
+                payloads.retain(|fmt| matches!(*fmt, "0" | "8" | "101"));
             }
             if payloads.is_empty() {
                 payloads.push("0");
@@ -574,6 +597,10 @@ fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16, force_pcmu: bool) -> R
             if payload == "0" {
                 have_pcmu_rtpmap = true;
                 rewritten.push("a=rtpmap:0 PCMU/8000".to_string());
+            } else if force_pcmu && payload == "8" {
+                rewritten.push("a=rtpmap:8 PCMA/8000".to_string());
+            } else if force_pcmu && payload == "101" {
+                rewritten.push(line.to_string());
             } else if !force_pcmu {
                 rewritten.push(line.to_string());
             }
@@ -581,14 +608,22 @@ fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16, force_pcmu: bool) -> R
         }
 
         if line.starts_with("a=fmtp:") {
-            if !force_pcmu || line.starts_with("a=fmtp:0") {
+            if !force_pcmu
+                || line.starts_with("a=fmtp:0")
+                || line.starts_with("a=fmtp:8")
+                || line.starts_with("a=fmtp:101")
+            {
                 rewritten.push(line.to_string());
             }
             continue;
         }
 
         if line.starts_with("a=rtcp-fb:") {
-            if !force_pcmu || line.starts_with("a=rtcp-fb:0") {
+            if !force_pcmu
+                || line.starts_with("a=rtcp-fb:0")
+                || line.starts_with("a=rtcp-fb:8")
+                || line.starts_with("a=rtcp-fb:101")
+            {
                 rewritten.push(line.to_string());
             }
             continue;

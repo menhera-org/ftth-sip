@@ -2313,20 +2313,6 @@ impl RsipstackBackend {
 
         match direction {
             TransactionDirection::Downstream => {
-                let allowed = &context.config.downstream.user_agent;
-                let realm = downstream_realm(&context);
-                if !self
-                    .ensure_downstream_proxy_authorized(
-                        &context,
-                        tx,
-                        &realm,
-                        allowed.password.as_deref(),
-                    )
-                    .await?
-                {
-                    return Ok(());
-                }
-
                 let call = stored_call.clone();
                 let endpoint = {
                     let guard = self.inner.endpoint.read().await;
