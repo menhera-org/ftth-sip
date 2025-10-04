@@ -377,12 +377,12 @@ impl SipBackend for RsipstackBackend {
         let cancel = CancellationToken::new();
         let transport_layer = TransportLayer::new(cancel.clone());
 
-        let (downstream_conn, downstream_addr) =
+        let (downstream_conn, downstream_addr, _downstream_canonical) =
             create_udp_listener(&context.config.downstream.bind, cancel.child_token()).await?;
         transport_layer.add_transport(downstream_conn.into());
         *context.sockets.downstream.lock().await = Some(downstream_addr);
 
-        let (upstream_conn, upstream_addr) =
+        let (upstream_conn, upstream_addr, _upstream_canonical) =
             create_udp_listener(&context.config.upstream.bind, cancel.child_token()).await?;
         transport_layer.add_transport(upstream_conn.into());
         *context.sockets.upstream.lock().await = Some(upstream_addr);
@@ -423,16 +423,12 @@ impl SipBackend for RsipstackBackend {
 
         let downstream_listener = {
             let guard = context.sockets.downstream.lock().await;
-            guard
-                .clone()
-                .ok_or_else(|| Error::configuration("downstream listener not bound"))?
+            guard.unwrap_or_else(|| context.config.downstream.bind.socket_addr())
         };
 
         let upstream_listener = {
             let guard = context.sockets.upstream.lock().await;
-            guard
-                .clone()
-                .ok_or_else(|| Error::configuration("upstream listener not bound"))?
+            guard.unwrap_or_else(|| context.config.upstream.bind.socket_addr())
         };
 
         let mut incoming = endpoint.incoming_transactions().map_err(Error::sip_stack)?;
@@ -701,9 +697,7 @@ impl UpstreamRegistrar {
 
         let local_socket = {
             let guard = self.context.sockets.upstream.lock().await;
-            guard
-                .to_owned()
-                .ok_or_else(|| Error::configuration("upstream listener not bound"))?
+            guard.unwrap_or_else(|| self.context.config.upstream.bind.socket_addr())
         };
 
         let identity = if config.default_identity.is_empty() {
@@ -1010,7 +1004,7 @@ fn constant_time_eq(lhs: &[u8], rhs: &[u8]) -> bool {
 async fn create_udp_listener(
     bind: &BindConfig,
     cancel_token: CancellationToken,
-) -> Result<(UdpConnection, SocketAddr)> {
+) -> Result<(UdpConnection, SocketAddr, SocketAddr)> {
     let socket = Socket::new(
         Domain::for_address(bind.socket_addr()),
         Type::DGRAM,
@@ -1067,7 +1061,7 @@ async fn create_udp_listener(
     )
     .await;
 
-    Ok((connection, local_addr))
+    Ok((connection, local_addr, canonical_addr))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1664,7 +1658,7 @@ impl RsipstackBackend {
                     let guard = context.sockets.upstream.lock().await;
                     guard
                         .clone()
-                        .ok_or_else(|| Error::configuration("upstream listener not bound"))?
+                        .unwrap_or_else(|| context.config.upstream.bind.socket_addr())
                 };
 
                 let config = context.config.as_ref();
@@ -1788,7 +1782,7 @@ impl RsipstackBackend {
                     let guard = context.sockets.downstream.lock().await;
                     guard
                         .clone()
-                        .ok_or_else(|| Error::configuration("downstream listener not bound"))?
+                        .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
 
                 let downstream_request = Self::prepare_downstream_request(
@@ -2497,7 +2491,7 @@ impl RsipstackBackend {
                     let guard = context.sockets.upstream.lock().await;
                     guard
                         .clone()
-                        .ok_or_else(|| Error::configuration("upstream listener not bound"))?
+                        .unwrap_or_else(|| context.config.upstream.bind.socket_addr())
                 };
 
                 let config = context.config.as_ref();
@@ -2631,7 +2625,7 @@ impl RsipstackBackend {
                     let guard = context.sockets.downstream.lock().await;
                     guard
                         .clone()
-                        .ok_or_else(|| Error::configuration("downstream listener not bound"))?
+                        .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
 
                 let config = context.config.as_ref();
@@ -2752,7 +2746,7 @@ impl RsipstackBackend {
                     let guard = context.sockets.upstream.lock().await;
                     guard
                         .clone()
-                        .ok_or_else(|| Error::configuration("upstream listener not bound"))?
+                        .unwrap_or_else(|| context.config.upstream.bind.socket_addr())
                 };
 
                 let config = context.config.as_ref();
@@ -2778,7 +2772,7 @@ impl RsipstackBackend {
                     let guard = context.sockets.downstream.lock().await;
                     guard
                         .clone()
-                        .ok_or_else(|| Error::configuration("downstream listener not bound"))?
+                        .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
 
                 let downstream_request = Self::prepare_downstream_request(
@@ -2935,7 +2929,7 @@ impl RsipstackBackend {
                     let guard = context.sockets.upstream.lock().await;
                     guard
                         .clone()
-                        .ok_or_else(|| Error::configuration("upstream listener not bound"))?
+                        .unwrap_or_else(|| context.config.upstream.bind.socket_addr())
                 };
 
                 let config = context.config.as_ref();
@@ -3019,7 +3013,7 @@ impl RsipstackBackend {
                     let guard = context.sockets.downstream.lock().await;
                     guard
                         .clone()
-                        .ok_or_else(|| Error::configuration("downstream listener not bound"))?
+                        .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
 
                 let downstream_request = Self::prepare_downstream_request(
