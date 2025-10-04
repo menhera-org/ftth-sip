@@ -23,4 +23,6 @@ authentication. When present the proxy challenges REGISTER and in-dialog
 requests arriving from the LAN side before relaying them upstream.
 When relaying toward the upstream NGN trunk the proxy rewrites SDP to
 offer PCMU (payload 0) exclusively, matching the officially supported
-capabilities for many deployments.
+capabilities for many deployments. The proxy will also trigger an upstream
+re-REGISTER whenever the downstream PBX refreshes its registration or when
+INVITE transactions time out, helping keep the trunk binding fresh.

@@ -12,7 +12,7 @@ use ftth_rsipstack::transport::{SipAddr, SipConnection, TransportLayer};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::runtime::Builder as RuntimeBuilder;
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{watch, Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -350,6 +350,7 @@ pub struct RsipstackBackend {
 struct BackendInner {
     endpoint: RwLock<Option<Arc<Endpoint>>>,
     transport_cancel: RwLock<CancellationToken>,
+    registrar: RwLock<Option<Arc<UpstreamRegistrar>>>,
 }
 
 impl Default for RsipstackBackend {
@@ -358,6 +359,7 @@ impl Default for RsipstackBackend {
             inner: Arc::new(BackendInner {
                 endpoint: RwLock::new(None),
                 transport_cancel: RwLock::new(CancellationToken::new()),
+                registrar: RwLock::new(None),
             }),
         }
     }
@@ -443,6 +445,10 @@ impl SipBackend for RsipstackBackend {
             endpoint.clone(),
             registrar_shutdown.clone(),
         );
+        {
+            let mut guard = self.inner.registrar.write().await;
+            guard.replace(registrar.clone());
+        }
         let registrar_handle = tokio::spawn(registrar.clone().run());
 
         loop {
@@ -480,6 +486,7 @@ impl SipBackend for RsipstackBackend {
         if let Err(join_err) = registrar_handle.await {
             error!(error = %join_err, "upstream registrar task failed");
         }
+        self.inner.registrar.write().await.take();
 
         Ok(())
     }
@@ -490,6 +497,7 @@ impl SipBackend for RsipstackBackend {
             endpoint.shutdown();
         }
         self.inner.transport_cancel.write().await.cancel();
+        self.inner.registrar.write().await.take();
         Ok(())
     }
 }
@@ -504,6 +512,7 @@ struct UpstreamRegistrar {
     cseq: AtomicU32,
     nonce_count: AtomicU32,
     challenge: RwLock<Option<DigestChallenge>>,
+    wake: Notify,
 }
 
 #[derive(Clone, Debug)]
@@ -525,6 +534,7 @@ impl UpstreamRegistrar {
             cseq: AtomicU32::new(1),
             nonce_count: AtomicU32::new(0),
             challenge: RwLock::new(None),
+            wake: Notify::new(),
         })
     }
 
@@ -538,6 +548,10 @@ impl UpstreamRegistrar {
                     info!("upstream registrar shutdown requested");
                     break;
                 }
+                _ = self.wake.notified() => {
+                    debug!("upstream registrar wake received");
+                    continue;
+                }
                 result = self.register_once() => {
                     match result {
                         Ok(next_refresh) => {
@@ -546,6 +560,10 @@ impl UpstreamRegistrar {
                                 _ = self.shutdown.cancelled() => {
                                     info!("upstream registrar shutdown requested");
                                     break;
+                                }
+                                _ = self.wake.notified() => {
+                                    debug!("upstream registrar refresh triggered early");
+                                    continue;
                                 }
                                 _ = tokio::time::sleep(next_refresh) => {}
                             }
@@ -559,6 +577,11 @@ impl UpstreamRegistrar {
                                     info!("upstream registrar shutdown requested");
                                     break;
                                 }
+                                _ = self.wake.notified() => {
+                                    debug!("upstream registrar retry triggered early");
+                                    backoff = Duration::from_secs(1);
+                                    continue;
+                                }
                                 _ = tokio::time::sleep(wait) => {}
                             }
                         }
@@ -568,6 +591,10 @@ impl UpstreamRegistrar {
         }
 
         info!("upstream registrar stopped");
+    }
+
+    fn trigger(&self) {
+        self.wake.notify_one();
     }
 
     async fn register_once(self: &Arc<Self>) -> Result<Duration> {
@@ -1525,6 +1552,12 @@ impl RsipstackBackend {
         Ok(request)
     }
 
+    async fn trigger_registration_refresh(&self) {
+        if let Some(registrar) = self.inner.registrar.read().await.as_ref().cloned() {
+            registrar.trigger();
+        }
+    }
+
     fn sip_addr_from_uri(uri: &Uri) -> Result<SipAddr> {
         let port = uri.host_with_port.port.map(|p| *p.value()).unwrap_or(5060);
 
@@ -2135,6 +2168,8 @@ impl RsipstackBackend {
                 context.media.release(&pending.media_key).await;
             }
         }
+
+        self.trigger_registration_refresh().await;
     }
 
     async fn process_transaction(
@@ -2273,6 +2308,10 @@ impl RsipstackBackend {
         context.registrations.write().await.upsert(registration);
 
         tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
+
+        if expires_secs > 0 {
+            self.trigger_registration_refresh().await;
+        }
         Ok(())
     }
 
