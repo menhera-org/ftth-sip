@@ -344,38 +344,23 @@ impl MediaSession {
                             }
                         };
 
-                        let expected = expected_source.read().await.clone();
-                        let mut accept_packet = true;
-                        if let Some(expected_src) = expected {
+                        let maybe_expected = expected_source.read().await.clone();
+                        if let Some(expected_src) = maybe_expected {
                             if src != expected_src {
-                                if src.ip() == expected_src.ip() {
-                                    tracing::debug!(
-                                        ?key,
-                                        label,
-                                        %expected_src,
-                                        %src,
-                                        "updating expected media source to new port"
-                                    );
-                                    let mut guard = expected_source.write().await;
-                                    *guard = Some(src);
-                                } else {
-                                    tracing::trace!(
-                                        ?key,
-                                        label,
-                                        %src,
-                                        %expected_src,
-                                        "ignoring packet from unexpected source"
-                                    );
-                                    accept_packet = false;
-                                }
+                                tracing::debug!(
+                                    ?key,
+                                    label,
+                                    %expected_src,
+                                    %src,
+                                    "updating expected media source to new address"
+                                );
+                                let mut guard = expected_source.write().await;
+                                *guard = Some(src);
                             }
                         } else {
                             tracing::debug!(?key, label, %src, "locking on first media source");
                             let mut guard = expected_source.write().await;
                             *guard = Some(src);
-                        }
-                        if !accept_packet {
-                            continue;
                         }
 
                         let destination = target_addr.read().await.clone();
