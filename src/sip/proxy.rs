@@ -1275,43 +1275,40 @@ impl RsipstackBackend {
         password: &str,
     ) -> Result<bool> {
         if username.is_empty() {
-            let proxy_auth =
-                match tx
-                    .original
+            let proxy_header =
+                tx.original
                     .headers
                     .clone()
                     .into_iter()
                     .find_map(|header| match header {
                         rsip::Header::ProxyAuthorization(value) => Some(value),
                         _ => None,
-                    }) {
-                    Some(header) => header.typed().map_err(Error::sip_stack)?.0.clone(),
-                    None => {
-                        self.challenge_downstream_proxy(context, tx, realm, false)
-                            .await?;
-                        return Ok(false);
-                    }
-                };
+                    });
+            let Some(header) = proxy_header else {
+                self.challenge_downstream_proxy(context, tx, realm, false)
+                    .await?;
+                return Ok(false);
+            };
+            let proxy_auth = header.typed().map_err(Error::sip_stack)?.0.clone();
 
             self.verify_digest(context, tx, realm, None, password, proxy_auth, true)
                 .await
         } else {
-            let auth = match tx
-                .original
-                .headers
-                .clone()
-                .into_iter()
-                .find_map(|header| match header {
-                    rsip::Header::Authorization(value) => Some(value),
-                    _ => None,
-                }) {
-                Some(header) => header.typed().map_err(Error::sip_stack)?,
-                None => {
-                    self.challenge_downstream_register(context, tx, realm, false)
-                        .await?;
-                    return Ok(false);
-                }
+            let register_header =
+                tx.original
+                    .headers
+                    .clone()
+                    .into_iter()
+                    .find_map(|header| match header {
+                        rsip::Header::Authorization(value) => Some(value),
+                        _ => None,
+                    });
+            let Some(header) = register_header else {
+                self.challenge_downstream_register(context, tx, realm, false)
+                    .await?;
+                return Ok(false);
             };
+            let auth = header.typed().map_err(Error::sip_stack)?;
 
             if !auth.username.eq_ignore_ascii_case(username) {
                 self.challenge_downstream_register(context, tx, realm, false)

@@ -52,6 +52,7 @@ impl MediaSessionHandle {
             body,
             self.inner.upstream.rtp_addr.ip(),
             self.inner.upstream.rtp_addr.port(),
+            true,
         )
     }
 
@@ -60,6 +61,7 @@ impl MediaSessionHandle {
             body,
             self.inner.downstream.rtp_addr.ip(),
             self.inner.downstream.rtp_addr.port(),
+            false,
         )
     }
 
@@ -405,37 +407,117 @@ pub struct SdpRewrite {
     pub remote_rtcp: SocketAddr,
 }
 
-fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16) -> Result<SdpRewrite> {
+fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16, force_pcmu: bool) -> Result<SdpRewrite> {
+    fn parse_connection_addr(rest: &str, ipv6: bool) -> Result<IpAddr> {
+        let token = rest
+            .trim()
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| Error::Media("invalid connection address".into()))?;
+        let addr_part = token.split('/').next().unwrap_or(token);
+        if ipv6 {
+            addr_part
+                .parse::<std::net::Ipv6Addr>()
+                .map(IpAddr::V6)
+                .map_err(|err| Error::Media(err.to_string()))
+        } else {
+            addr_part
+                .parse::<std::net::Ipv4Addr>()
+                .map(IpAddr::V4)
+                .map_err(|err| Error::Media(err.to_string()))
+        }
+    }
+
+    fn format_connection_line(ip: IpAddr) -> String {
+        match ip {
+            IpAddr::V4(addr) => format!("c=IN IP4 {}", addr),
+            IpAddr::V6(addr) => format!("c=IN IP6 {}", addr),
+        }
+    }
+
+    fn format_rtcp_line(new_port: u16, new_ip: IpAddr, tokens: &[&str]) -> String {
+        let mut line = format!("a=rtcp:{}", new_port);
+        if tokens.is_empty() {
+            return line;
+        }
+
+        if tokens.len() >= 3
+            && tokens[0].eq_ignore_ascii_case("IN")
+            && tokens[1].eq_ignore_ascii_case("IP4")
+        {
+            match new_ip {
+                IpAddr::V4(ip) => line.push_str(&format!(" IN IP4 {}", ip)),
+                IpAddr::V6(ip) => line.push_str(&format!(" IN IP6 {}", ip)),
+            }
+            if tokens.len() > 3 {
+                line.push(' ');
+                line.push_str(&tokens[3..].join(" "));
+            }
+        } else if tokens.len() >= 3
+            && tokens[0].eq_ignore_ascii_case("IN")
+            && tokens[1].eq_ignore_ascii_case("IP6")
+        {
+            match new_ip {
+                IpAddr::V4(ip) => line.push_str(&format!(" IN IP4 {}", ip)),
+                IpAddr::V6(ip) => line.push_str(&format!(" IN IP6 {}", ip)),
+            }
+            if tokens.len() > 3 {
+                line.push(' ');
+                line.push_str(&tokens[3..].join(" "));
+            }
+        } else {
+            line.push(' ');
+            line.push_str(&tokens.join(" "));
+        }
+
+        line
+    }
+
     let newline = if body.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut session_connection: Option<IpAddr> = None;
     let mut remote_ip: Option<IpAddr> = None;
     let mut remote_rtp: Option<u16> = None;
     let mut remote_rtcp: Option<u16> = None;
     let mut rewritten = Vec::new();
-    let mut has_pcmu_payload = false;
-    let mut has_rtpmap_pcmu = false;
+    let mut in_audio = false;
+    let mut seen_media = false;
+    let mut have_pcmu_rtpmap = false;
 
     for line in body.lines() {
+        if line.starts_with("m=") {
+            seen_media = true;
+            in_audio = line.starts_with("m=audio ");
+            if in_audio && remote_ip.is_none() {
+                remote_ip = session_connection;
+            }
+        }
+
         if let Some(rest) = line.strip_prefix("c=IN IP4 ") {
-            remote_ip = Some(
-                rest.trim()
-                    .parse::<std::net::Ipv4Addr>()
-                    .map(IpAddr::V4)
-                    .map_err(|err| Error::Media(err.to_string()))?,
-            );
-            rewritten.push(format!("c=IN IP4 {}", new_ip));
+            let parsed = parse_connection_addr(rest, false)?;
+            if !seen_media {
+                session_connection = Some(parsed);
+            }
+            if in_audio {
+                remote_ip = Some(parsed);
+            }
+            rewritten.push(format_connection_line(new_ip));
             continue;
         }
+
         if let Some(rest) = line.strip_prefix("c=IN IP6 ") {
-            remote_ip = Some(
-                rest.trim()
-                    .parse::<std::net::Ipv6Addr>()
-                    .map(IpAddr::V6)
-                    .map_err(|err| Error::Media(err.to_string()))?,
-            );
-            rewritten.push(format!("c=IN IP6 {}", new_ip));
+            let parsed = parse_connection_addr(rest, true)?;
+            if !seen_media {
+                session_connection = Some(parsed);
+            }
+            if in_audio {
+                remote_ip = Some(parsed);
+            }
+            rewritten.push(format_connection_line(new_ip));
             continue;
         }
+
         if let Some(rest) = line.strip_prefix("m=audio ") {
+            in_audio = true;
             let mut parts = rest.split_whitespace();
             let port_str = parts
                 .next()
@@ -447,23 +529,28 @@ fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16) -> Result<SdpRewrite> 
             let proto = parts
                 .next()
                 .ok_or_else(|| Error::Media("missing transport protocol in m=audio".into()))?;
-            let payloads: Vec<&str> = parts.collect();
-            let mut filtered: Vec<&str> = payloads.into_iter().filter(|fmt| *fmt == "0").collect();
-            if filtered.is_empty() {
-                filtered.push("0");
+            let mut payloads: Vec<&str> = parts.collect();
+            if force_pcmu {
+                payloads.retain(|fmt| *fmt == "0");
             }
-            has_pcmu_payload = true;
-            let payload_section = filtered.join(" ");
-            if payload_section.is_empty() {
-                rewritten.push(format!("m=audio {} {}", new_port, proto));
-            } else {
-                rewritten.push(format!(
-                    "m=audio {} {} {}",
-                    new_port, proto, payload_section
-                ));
+            if payloads.is_empty() {
+                payloads.push("0");
             }
+            let mut line = format!("m=audio {} {}", new_port, proto);
+            if !payloads.is_empty() {
+                line.push(' ');
+                line.push_str(&payloads.join(" "));
+            }
+            rewritten.push(line);
             continue;
         }
+
+        if line.starts_with("m=") {
+            in_audio = false;
+            rewritten.push(line.to_string());
+            continue;
+        }
+
         if let Some(rest) = line.strip_prefix("a=rtcp:") {
             let mut parts = rest.split_whitespace();
             let port_str = parts
@@ -473,52 +560,56 @@ fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16) -> Result<SdpRewrite> 
                 .parse::<u16>()
                 .map_err(|err| Error::Media(err.to_string()))?;
             remote_rtcp = Some(port);
-            let remainder: String = parts.collect::<Vec<_>>().join(" ");
+            let remainder: Vec<&str> = parts.collect();
             let rewritten_port = new_port.saturating_add(1);
-            if remainder.is_empty() {
-                rewritten.push(format!("a=rtcp:{}", rewritten_port));
-            } else {
-                rewritten.push(format!("a=rtcp:{} {}", rewritten_port, remainder));
-            }
+            rewritten.push(format_rtcp_line(rewritten_port, new_ip, &remainder));
             continue;
         }
+
         if let Some(rest) = line.strip_prefix("a=rtpmap:") {
             let mut parts = rest.split_whitespace();
             let payload = parts
                 .next()
                 .ok_or_else(|| Error::Media("invalid a=rtpmap syntax".into()))?;
             if payload == "0" {
-                has_rtpmap_pcmu = true;
+                have_pcmu_rtpmap = true;
                 rewritten.push("a=rtpmap:0 PCMU/8000".to_string());
+            } else if !force_pcmu {
+                rewritten.push(line.to_string());
             }
             continue;
         }
+
         if line.starts_with("a=fmtp:") {
-            if line.starts_with("a=fmtp:0") {
+            if !force_pcmu || line.starts_with("a=fmtp:0") {
                 rewritten.push(line.to_string());
             }
             continue;
         }
+
         if line.starts_with("a=rtcp-fb:") {
-            if line.starts_with("a=rtcp-fb:0") {
+            if !force_pcmu || line.starts_with("a=rtcp-fb:0") {
                 rewritten.push(line.to_string());
             }
             continue;
         }
+
         rewritten.push(line.to_string());
     }
 
-    let remote_ip = remote_ip.ok_or_else(|| Error::Media("missing connection address".into()))?;
+    let remote_ip = remote_ip
+        .or(session_connection)
+        .ok_or_else(|| Error::Media("missing connection address".into()))?;
     let remote_rtp_port =
         remote_rtp.ok_or_else(|| Error::Media("missing audio media port".into()))?;
     let remote_rtcp_port = remote_rtcp.unwrap_or_else(|| remote_rtp_port.saturating_add(1));
 
-    if has_pcmu_payload && !has_rtpmap_pcmu {
-        rewritten.push("a=rtpmap:0 PCMU/8000".into());
+    if force_pcmu && !have_pcmu_rtpmap {
+        rewritten.push("a=rtpmap:0 PCMU/8000".to_string());
     }
 
     let mut sdp = rewritten.join(newline);
-    if body.ends_with('\n') {
+    if body.ends_with("\n") {
         sdp.push_str(newline);
     }
 
