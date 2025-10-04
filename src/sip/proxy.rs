@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use ftth_rsipstack::transaction::endpoint::MessageInspector;
@@ -45,6 +45,7 @@ pub struct SipContext {
     pub registrations: Arc<RwLock<RegistrationCache>>,
     pub sockets: Arc<ListenerSockets>,
     pub calls: Arc<RwLock<HashMap<String, CallContext>>>,
+    auth: Arc<DownstreamAuthState>,
     pending: Arc<RwLock<HashMap<String, PendingInvite>>>,
 }
 
@@ -70,6 +71,48 @@ pub struct CallContext {
 enum PendingInvite {
     Outbound(OutboundPendingInvite),
     Inbound(InboundPendingInvite),
+}
+
+const DOWNSTREAM_NONCE_TTL: Duration = Duration::from_secs(300);
+
+#[derive(Debug)]
+struct DownstreamAuthState {
+    counter: AtomicU64,
+    nonces: Mutex<HashMap<String, Instant>>,
+}
+
+impl DownstreamAuthState {
+    fn new() -> Self {
+        Self {
+            counter: AtomicU64::new(1),
+            nonces: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn issue_nonce(&self) -> String {
+        let seq = self.counter.fetch_add(1, Ordering::Relaxed);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0));
+        let raw = format!("{}:{}:{}", seq, now.as_nanos(), std::process::id());
+        let nonce = md5_hex(raw.as_bytes());
+
+        let mut guard = self.nonces.lock().await;
+        guard.retain(|_, issued| issued.elapsed() < DOWNSTREAM_NONCE_TTL);
+        guard.insert(nonce.clone(), Instant::now());
+        nonce
+    }
+
+    async fn is_valid(&self, nonce: &str) -> bool {
+        let mut guard = self.nonces.lock().await;
+        guard.retain(|_, issued| issued.elapsed() < DOWNSTREAM_NONCE_TTL);
+        guard.contains_key(nonce)
+    }
+
+    async fn invalidate(&self, nonce: &str) {
+        let mut guard = self.nonces.lock().await;
+        guard.remove(nonce);
+    }
 }
 
 #[derive(Clone)]
@@ -185,6 +228,7 @@ where
             registrations: Arc::new(RwLock::new(RegistrationCache::new())),
             sockets: Arc::new(ListenerSockets::default()),
             calls: Arc::new(RwLock::new(HashMap::new())),
+            auth: Arc::new(DownstreamAuthState::new()),
             pending: Arc::new(RwLock::new(HashMap::new())),
         };
 
@@ -915,6 +959,17 @@ fn generate_cnonce() -> String {
     format!("{:x}", now.as_nanos())
 }
 
+fn constant_time_eq(lhs: &[u8], rhs: &[u8]) -> bool {
+    if lhs.len() != rhs.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in lhs.iter().zip(rhs.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 async fn create_udp_listener(
     bind: &BindConfig,
     cancel_token: CancellationToken,
@@ -1123,6 +1178,82 @@ impl RsipstackBackend {
         let mut target: SipAddr = socket.into();
         target.r#type = Some(Transport::Udp);
         target
+    }
+
+    fn compute_authorization_response(
+        authorization: &rsip::typed::Authorization,
+        request: &rsip::Request,
+        password: &str,
+        realm: &str,
+    ) -> Result<String> {
+        if authorization.scheme != auth::Scheme::Digest {
+            return Err(Error::configuration("unsupported downstream auth scheme"));
+        }
+
+        if let Some(algorithm) = authorization.algorithm {
+            if algorithm != auth::Algorithm::Md5 {
+                return Err(Error::configuration(
+                    "unsupported downstream digest algorithm",
+                ));
+            }
+        }
+
+        let method = request.method.to_string();
+        let uri = authorization.uri.to_string();
+
+        let ha1_input = format!("{}:{}:{}", authorization.username, realm, password);
+        let ha1 = md5_hex(ha1_input.as_bytes());
+
+        let ha2_input = format!("{}:{}", method, uri);
+        let ha2 = md5_hex(ha2_input.as_bytes());
+
+        let response = match &authorization.qop {
+            Some(AuthQop::Auth { cnonce, nc }) => {
+                let nc_str = format!("{:08x}", nc);
+                md5_hex(
+                    format!(
+                        "{}:{}:{}:{}:{}:{}",
+                        ha1, authorization.nonce, nc_str, cnonce, "auth", ha2
+                    )
+                    .as_bytes(),
+                )
+            }
+            Some(AuthQop::AuthInt { .. }) => {
+                return Err(Error::configuration("qop auth-int not supported"));
+            }
+            None => md5_hex(format!("{}:{}:{}", ha1, authorization.nonce, ha2).as_bytes()),
+        };
+
+        Ok(response)
+    }
+
+    async fn challenge_downstream_register(
+        &self,
+        context: &SipContext,
+        tx: &mut Transaction,
+        realm: &str,
+        stale: bool,
+    ) -> Result<()> {
+        let nonce = context.auth.issue_nonce().await;
+        let challenge = rsip::typed::WwwAuthenticate {
+            scheme: auth::Scheme::Digest,
+            realm: realm.to_string(),
+            domain: None,
+            nonce,
+            opaque: None,
+            stale: stale.then(|| "true".into()),
+            algorithm: Some(auth::Algorithm::Md5),
+            qop: Some(Qop::Auth),
+            charset: None,
+        };
+
+        tx.reply_with(
+            StatusCode::Unauthorized,
+            vec![rsip::Header::WwwAuthenticate(challenge.into())],
+            None,
+        )
+        .await
+        .map_err(Error::sip_stack)
     }
 
     fn prepare_downstream_request(
@@ -1843,6 +1974,11 @@ impl RsipstackBackend {
         }
 
         let allowed = &context.config.downstream.user_agent;
+        let realm = allowed
+            .realm
+            .clone()
+            .unwrap_or_else(|| context.config.upstream.sip_domain.clone());
+
         let username = tx
             .original
             .to_header()
@@ -1861,6 +1997,79 @@ impl RsipstackBackend {
                 .map_err(Error::sip_stack)?;
             return Ok(());
         }
+
+        let authorization = tx
+            .original
+            .authorization_header()
+            .cloned()
+            .and_then(|header| header.typed().ok());
+
+        let Some(authorization) = authorization else {
+            self.challenge_downstream_register(&context, tx, &realm, false)
+                .await?;
+            return Ok(());
+        };
+
+        if authorization.scheme != auth::Scheme::Digest {
+            self.challenge_downstream_register(&context, tx, &realm, false)
+                .await?;
+            return Ok(());
+        }
+
+        if !authorization
+            .username
+            .eq_ignore_ascii_case(&allowed.username)
+        {
+            self.challenge_downstream_register(&context, tx, &realm, false)
+                .await?;
+            return Ok(());
+        }
+
+        if authorization.realm != realm {
+            self.challenge_downstream_register(&context, tx, &realm, false)
+                .await?;
+            return Ok(());
+        }
+
+        if let Some(algorithm) = authorization.algorithm {
+            if algorithm != auth::Algorithm::Md5 {
+                self.challenge_downstream_register(&context, tx, &realm, false)
+                    .await?;
+                return Ok(());
+            }
+        }
+
+        if !context.auth.is_valid(&authorization.nonce).await {
+            self.challenge_downstream_register(&context, tx, &realm, true)
+                .await?;
+            return Ok(());
+        }
+
+        let expected_response = match Self::compute_authorization_response(
+            &authorization,
+            &tx.original,
+            &allowed.password,
+            &realm,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                warn!(error = %err, "failed to compute expected digest for downstream REGISTER");
+                context.auth.invalidate(&authorization.nonce).await;
+                self.challenge_downstream_register(&context, tx, &realm, true)
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        let provided = authorization.response.to_ascii_lowercase();
+        if !constant_time_eq(expected_response.as_bytes(), provided.as_bytes()) {
+            context.auth.invalidate(&authorization.nonce).await;
+            self.challenge_downstream_register(&context, tx, &realm, true)
+                .await?;
+            return Ok(());
+        }
+
+        context.auth.invalidate(&authorization.nonce).await;
 
         let default_expires = context.config.timers.registration_refresh_secs;
         let expires_secs = match tx.original.expires_header() {

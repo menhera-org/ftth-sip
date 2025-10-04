@@ -54,6 +54,7 @@ mod tests {
                 user_agent: AllowedUserAgent {
                     username: "asterisk".into(),
                     realm: Some("asterisk.local".into()),
+                    password: "secret".into(),
                 },
                 transport: TransportProfile::Udp,
             },

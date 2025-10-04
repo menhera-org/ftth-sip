@@ -59,6 +59,8 @@ pub struct AllowedUserAgent {
     pub username: String,
     /// Optional digest realm override for LAN clients.
     pub realm: Option<String>,
+    /// Shared secret used for digest authentication challenges.
+    pub password: String,
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]

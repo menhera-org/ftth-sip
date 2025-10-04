@@ -78,6 +78,10 @@ struct Cli {
     #[arg(long)]
     downstream_username: String,
 
+    /// Password shared with downstream user agent for digest auth
+    #[arg(long)]
+    downstream_password: String,
+
     /// Optional realm override for downstream digest auth
     #[arg(long)]
     downstream_realm: Option<String>,
@@ -209,6 +213,7 @@ impl Cli {
             user_agent: AllowedUserAgent {
                 username: self.downstream_username.clone(),
                 realm: self.downstream_realm,
+                password: self.downstream_password.clone(),
             },
             transport: TransportProfile::Udp,
         };
