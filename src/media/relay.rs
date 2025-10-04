@@ -501,33 +501,38 @@ fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16, force_pcmu: bool) -> R
         }
 
         if let Some(rest) = line.strip_prefix("o=") {
-            let parts: Vec<&str> = rest.split_whitespace().collect();
-            if parts.len() >= 6 && parts[3].eq_ignore_ascii_case("IN") {
-                let addrtype = match new_ip {
-                    IpAddr::V4(_) => "IP4",
-                    IpAddr::V6(_) => "IP6",
-                };
-                let address = match new_ip {
-                    IpAddr::V4(ip) => ip.to_string(),
-                    IpAddr::V6(ip) => ip.to_string(),
-                };
-                let mut rewritten_line = format!(
-                    "o={} {} {} IN {} {}",
-                    parts[0],
-                    parts.get(1).unwrap_or(&"0"),
-                    parts.get(2).unwrap_or(&"0"),
-                    addrtype,
-                    address
-                );
-                if parts.len() > 6 {
-                    let tail = parts[6..].join(" ");
-                    rewritten_line.push(' ');
-                    rewritten_line.push_str(&tail);
+            let mut parts = rest.split_whitespace();
+            let username = parts.next();
+            let sess_id = parts.next();
+            let sess_version = parts.next();
+            let network = parts.next();
+            let _addr_type = parts.next();
+            let _addr = parts.next();
+            let tail: Vec<&str> = parts.collect();
+
+            if let (Some(username), Some(sess_id), Some(sess_version), Some(network)) =
+                (username, sess_id, sess_version, network)
+            {
+                if network.eq_ignore_ascii_case("IN") {
+                    let addrtype = match new_ip {
+                        IpAddr::V4(_) => "IP4",
+                        IpAddr::V6(_) => "IP6",
+                    };
+                    let address = new_ip.to_string();
+                    let mut rewritten_line = format!(
+                        "o={} {} {} IN {} {}",
+                        username, sess_id, sess_version, addrtype, address
+                    );
+                    if !tail.is_empty() {
+                        rewritten_line.push(' ');
+                        rewritten_line.push_str(&tail.join(" "));
+                    }
+                    rewritten.push(rewritten_line);
+                    continue;
                 }
-                rewritten.push(rewritten_line);
-            } else {
-                rewritten.push(line.to_string());
             }
+
+            rewritten.push(line.to_string());
             continue;
         }
 

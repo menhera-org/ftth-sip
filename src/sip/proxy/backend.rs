@@ -461,6 +461,9 @@ impl RsipstackBackend {
 
             let p_preferred = format!("<sip:{}@{}>", preferred_user, upstream_config.sip_domain);
 
+            request.headers.retain(|header| {
+                !matches!(header, rsip::Header::Other(name, _) if name.eq_ignore_ascii_case("P-Preferred-Identity"))
+            });
             request.headers.push(rsip::Header::Other(
                 "P-Preferred-Identity".into(),
                 p_preferred.clone(),
@@ -473,9 +476,14 @@ impl RsipstackBackend {
                     .unique_push(rsip::Header::Route(rsip::headers::Route::from(route_value)));
             }
 
-            request.headers.unique_push(rsip::Header::MaxForwards(
-                rsip::headers::MaxForwards::from(70u32),
-            ));
+            request
+                .headers
+                .retain(|header| !matches!(header, rsip::Header::MaxForwards(_)));
+            request
+                .headers
+                .push(rsip::Header::MaxForwards(rsip::headers::MaxForwards::from(
+                    69u32,
+                )));
 
             request
                 .headers
@@ -486,11 +494,24 @@ impl RsipstackBackend {
                     "100rel, timer".to_string(),
                 )));
             request.headers.retain(|header| {
+                !matches!(header, rsip::Header::Other(name, _) if name.eq_ignore_ascii_case("Allow"))
+            });
+            request.headers.push(rsip::Header::Other(
+                "Allow".into(),
+                "INVITE, CANCEL, ACK, BYE, PRACK, UPDATE".into(),
+            ));
+            request.headers.retain(|header| {
                 !matches!(header, rsip::Header::Other(name, _) if name.eq_ignore_ascii_case("Session-Expires"))
             });
             request
                 .headers
                 .push(rsip::Header::Other("Session-Expires".into(), "300".into()));
+            request.headers.retain(|header| {
+                !matches!(header, rsip::Header::Other(name, _) if name.eq_ignore_ascii_case("Min-SE"))
+            });
+            request
+                .headers
+                .push(rsip::Header::Other("Min-SE".into(), "300".into()));
         } else {
             if !route_set.is_empty() {
                 let route_value = UriWithParamsList::from(route_set.to_vec()).to_string();
@@ -499,9 +520,14 @@ impl RsipstackBackend {
                     .unique_push(rsip::Header::Route(rsip::headers::Route::from(route_value)));
             }
 
-            request.headers.unique_push(rsip::Header::MaxForwards(
-                rsip::headers::MaxForwards::from(70u32),
-            ));
+            request
+                .headers
+                .retain(|header| !matches!(header, rsip::Header::MaxForwards(_)));
+            request
+                .headers
+                .push(rsip::Header::MaxForwards(rsip::headers::MaxForwards::from(
+                    70u32,
+                )));
         }
 
         Ok(request)
