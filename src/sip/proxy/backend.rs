@@ -795,6 +795,8 @@ impl RsipstackBackend {
             request.body = body;
         }
 
+        let original_uri = request.uri.clone();
+
         let content_length = request.body.len() as u32;
         request.headers.unique_push(rsip::Header::ContentLength(
             rsip::headers::ContentLength::from(content_length),
@@ -803,6 +805,38 @@ impl RsipstackBackend {
         request
             .headers
             .retain(|header| !matches!(header, rsip::Header::Via(_)));
+
+        if let Some(contact_uri) = &call.downstream_contact {
+            request.uri = contact_uri.clone();
+        } else {
+            let downstream_host = downstream_listener.to_string();
+            let host_with_port =
+                HostWithPort::try_from(downstream_host.as_str()).map_err(Error::sip_stack)?;
+            request.uri.host_with_port = host_with_port;
+        }
+
+        let original_uri_string = original_uri.to_string();
+        let has_original_uri_header = request.headers.iter().any(|header| match header {
+            rsip::Header::Other(name, _) => name.eq_ignore_ascii_case("X-Ftth-Original-Uri"),
+            _ => false,
+        });
+        if !has_original_uri_header {
+            request.headers.push(rsip::Header::Other(
+                "X-Ftth-Original-Uri".into(),
+                original_uri_string.clone(),
+            ));
+        }
+
+        let has_p_called_party = request.headers.iter().any(|header| match header {
+            rsip::Header::Other(name, _) => name.eq_ignore_ascii_case("P-Called-Party-ID"),
+            _ => false,
+        });
+        if !has_p_called_party {
+            request.headers.push(rsip::Header::Other(
+                "P-Called-Party-ID".into(),
+                format!("<{}>", original_uri_string),
+            ));
+        }
 
         if let Some(contact) = &call.downstream_contact {
             request
@@ -1267,6 +1301,12 @@ impl RsipstackBackend {
                             match downstream_response.status_code.kind() {
                                 StatusCodeKind::Provisional => {}
                                 _ => {
+                                    if downstream_response.status_code == StatusCode::NotFound {
+                                        debug!(
+                                            status = %downstream_response.status_code,
+                                            "downstream returned 404 Not Found for call"
+                                        );
+                                    }
                                     final_status = Some(downstream_response.status_code.clone());
                                     final_response = Some(downstream_response);
                                     break;
@@ -1358,6 +1398,8 @@ impl RsipstackBackend {
 
         pending.cancel_token.cancel();
 
+        let mut refresh_registration = false;
+
         match result {
             Ok((Some(status), Some(response)))
                 if matches!(status.kind(), StatusCodeKind::Successful) =>
@@ -1402,6 +1444,7 @@ impl RsipstackBackend {
             }
             Ok(_) => {
                 context.media.release(&pending.media_key).await;
+                refresh_registration = true;
             }
             Err(err) => {
                 warn!(error = %err, "inbound invite forwarding task failed");
@@ -1410,7 +1453,12 @@ impl RsipstackBackend {
                     warn!(error = %reply_err, "failed to notify upstream about INVITE failure");
                 }
                 context.media.release(&pending.media_key).await;
+                refresh_registration = true;
             }
+        }
+
+        if refresh_registration {
+            self.trigger_registration_refresh().await;
         }
     }
 
