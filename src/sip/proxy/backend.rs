@@ -50,14 +50,12 @@ use super::utils::{constant_time_eq, md5_hex, strip_rport_param};
 use crate::sip::registration::DownstreamRegistration;
 use tracing::{debug, error, info, warn};
 
-#[derive(Debug)]
-struct ProxyMessageInspector {
-    downstream_addrs: Vec<SocketAddr>,
-}
+#[derive(Debug, Default)]
+struct ProxyMessageInspector;
 
 impl ProxyMessageInspector {
-    fn new(downstream_addrs: Vec<SocketAddr>) -> Self {
-        Self { downstream_addrs }
+    fn new(_downstream_addrs: Vec<SocketAddr>) -> Self {
+        Self
     }
 
     fn strip_rport(via: &mut rsip::headers::Via) {
@@ -69,96 +67,18 @@ impl ProxyMessageInspector {
         }
     }
 
-    fn is_downstream_target(&self, headers: &rsip::Headers) -> bool {
-        let Some(via) = headers.iter().find_map(|header| match header {
-            rsip::Header::Via(v) => Some(v.clone()),
-            _ => None,
-        }) else {
-            return false;
-        };
-
-        let Ok(typed) = via.typed() else {
-            return false;
-        };
-
-        let host = &typed.uri.host_with_port.host;
-        let port = typed
-            .uri
-            .host_with_port
-            .port
-            .map(|p| *p.value())
-            .unwrap_or(5060);
-
-        match host {
-            rsip::host_with_port::Host::IpAddr(ip) => self
-                .downstream_addrs
-                .iter()
-                .any(|addr| addr.ip() == *ip && addr.port() == port),
-            _ => false,
-        }
-    }
-
-    fn strip_routes(headers: &mut rsip::Headers) {
-        headers.retain(|header| match header {
-            rsip::Header::Route(_) | rsip::Header::RecordRoute(_) => false,
-            rsip::Header::Other(name, _)
-                if name.eq_ignore_ascii_case("X-Ftth-Strip-Routes") => false,
-            _ => true,
-        });
-    }
-
-    fn rewrite_contact(&self, headers: &mut rsip::Headers) {
-        if self.downstream_addrs.is_empty() {
-            return;
-        }
-
-        let primary = self.downstream_addrs[0];
-
-        if let Some(contact) = headers.iter_mut().find_map(|header| match header {
-            rsip::Header::Contact(c) => Some(c),
-            _ => None,
-        }) {
-            if let Ok(mut typed) = contact.clone().typed() {
-                let mut uri = Uri::from(primary);
-                uri.scheme = Some(Scheme::Sip);
-                if typed.uri.auth.is_some() {
-                    uri.auth = typed.uri.auth.clone();
-                }
-                typed.uri = uri;
-                *contact = typed.into();
-            } else {
-                let mut uri = Uri::from(primary);
-                uri.scheme = Some(Scheme::Sip);
-                *contact = Contact::from(format!("<{}>", uri));
-            }
-        }
-    }
 }
 
 impl MessageInspector for ProxyMessageInspector {
     fn before_send(&self, msg: SipMessage) -> SipMessage {
         match msg {
             SipMessage::Request(mut req) => {
-                let should_strip = req.headers.iter().any(|header| matches!(
-                    header,
-                    rsip::Header::Other(name, _) if name.eq_ignore_ascii_case("X-Ftth-Strip-Routes")
-                )) || self.is_downstream_target(&req.headers);
-                if should_strip {
-                    Self::strip_routes(&mut req.headers);
-                    self.rewrite_contact(&mut req.headers);
-                }
                 if let Ok(via) = req.via_header_mut() {
                     Self::strip_rport(via);
                 }
                 SipMessage::Request(req)
             }
-            SipMessage::Response(mut resp) => {
-                if self.is_downstream_target(&resp.headers) {
-                    Self::strip_routes(&mut resp.headers);
-                    self.rewrite_contact(&mut resp.headers);
-                }
-                SipMessage::Response(resp)
-            }
+            other => other,
         }
     }
 
@@ -1313,10 +1233,6 @@ impl RsipstackBackend {
             request.headers.retain(|header| {
                 !matches!(header, rsip::Header::Route(_) | rsip::Header::RecordRoute(_))
             });
-            request.headers.push(rsip::Header::Other(
-                "X-Ftth-Strip-Routes".into(),
-                String::new(),
-            ));
         }
         let key = TransactionKey::from_request(&request, TransactionRole::Client)
             .map_err(Error::sip_stack)?;
@@ -1631,15 +1547,58 @@ impl RsipstackBackend {
         headers.push(rsip::Header::Via(via));
     }
 
+    fn rewrite_contact_for_downstream(
+        headers: &mut rsip::Headers,
+        listener: SocketAddr,
+        default_user: Option<&str>,
+    ) {
+        let mut uri = Uri::from(listener);
+        uri.scheme = Some(Scheme::Sip);
+
+        let mut ensure_user = |existing_auth: Option<UriAuth>| {
+            if let Some(auth) = existing_auth {
+                uri.auth = Some(auth);
+            } else if let Some(user) = default_user {
+                uri.auth = Some(UriAuth::from((user, Option::<String>::None)));
+            }
+        };
+
+        if let Some(contact) = headers.iter_mut().find_map(|header| match header {
+            rsip::Header::Contact(c) => Some(c),
+            _ => None,
+        }) {
+            if let Ok(mut typed) = contact.clone().typed() {
+                let existing_auth = typed.uri.auth.clone();
+                ensure_user(existing_auth);
+                typed.uri = uri;
+                *contact = typed.into();
+            } else {
+                ensure_user(None);
+                *contact = Contact::from(format!("<{}>", uri));
+            }
+        } else {
+            ensure_user(None);
+            headers.push(rsip::Header::Contact(Contact::from(format!("<{}>", uri))));
+        }
+    }
+
     async fn forward_upstream_responses(
         &self,
         mut client_tx: Transaction,
         downstream_tx: Arc<Mutex<Transaction>>,
         media_session: MediaSessionHandle,
         cancel_token: CancellationToken,
+        context: SipContext,
     ) -> Result<(Option<StatusCode>, Option<Response>)> {
         let mut final_status: Option<StatusCode> = None;
         let mut final_response: Option<Response> = None;
+
+        let downstream_listener = {
+            let guard = context.sockets.downstream.lock().await;
+            guard
+                .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
+        };
+        let default_user = context.config.downstream.default_user.as_deref();
 
         loop {
             tokio::select! {
@@ -1656,6 +1615,11 @@ impl RsipstackBackend {
                                     rsip::Header::Route(_) | rsip::Header::RecordRoute(_)
                                 )
                             });
+                            Self::rewrite_contact_for_downstream(
+                                &mut upstream_response.headers,
+                                downstream_listener,
+                                default_user,
+                            );
                             let downstream_via = {
                                 let guard = downstream_tx.lock().await;
                                 guard
@@ -1719,9 +1683,17 @@ impl RsipstackBackend {
         upstream_tx: Arc<Mutex<Transaction>>,
         media_session: MediaSessionHandle,
         cancel_token: CancellationToken,
+        context: SipContext,
     ) -> Result<(Option<StatusCode>, Option<Response>)> {
         let mut final_status: Option<StatusCode> = None;
         let mut final_response: Option<Response> = None;
+
+        let downstream_listener = {
+            let guard = context.sockets.downstream.lock().await;
+            guard
+                .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
+        };
+        let default_user = context.config.downstream.default_user.as_deref();
 
         loop {
             tokio::select! {
@@ -1738,6 +1710,11 @@ impl RsipstackBackend {
                                     rsip::Header::Route(_) | rsip::Header::RecordRoute(_)
                                 )
                             });
+                            Self::rewrite_contact_for_downstream(
+                                &mut downstream_response.headers,
+                                downstream_listener,
+                                default_user,
+                            );
                             let upstream_via = {
                                 let guard = upstream_tx.lock().await;
                                 guard
@@ -2404,6 +2381,7 @@ impl RsipstackBackend {
                             task_downstream,
                             task_media,
                             task_cancel,
+                            context_clone.clone(),
                         )
                         .await;
                     backend
@@ -2581,6 +2559,7 @@ impl RsipstackBackend {
                             upstream_tx,
                             media_session,
                             cancel_token,
+                            context_clone.clone(),
                         )
                         .await;
                     backend
