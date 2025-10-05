@@ -50,16 +50,10 @@ use super::utils::{constant_time_eq, md5_hex, strip_rport_param};
 use crate::sip::registration::DownstreamRegistration;
 use tracing::{debug, error, info, warn};
 
-#[derive(Debug)]
-struct ProxyMessageInspector {
-    downstream_addrs: Vec<SocketAddr>,
-}
+#[derive(Debug, Default)]
+struct ProxyMessageInspector;
 
 impl ProxyMessageInspector {
-    fn new(downstream_addrs: Vec<SocketAddr>) -> Self {
-        Self { downstream_addrs }
-    }
-
     fn strip_rport(via: &mut rsip::headers::Via) {
         if let Ok(mut typed) = via.clone().typed() {
             typed.params.retain(|param| {
@@ -68,44 +62,12 @@ impl ProxyMessageInspector {
             *via = typed.into();
         }
     }
-
-    fn is_downstream_request(&self, request: &rsip::Request) -> bool {
-        let Ok(via) = request.via_header() else {
-            return false;
-        };
-        let Ok(typed) = via.typed() else {
-            return false;
-        };
-        let host = &typed.uri.host_with_port.host;
-        let port = typed
-            .uri
-            .host_with_port
-            .port
-            .map(|p| *p.value())
-            .unwrap_or(5060);
-
-        if let rsip::host_with_port::Host::IpAddr(ip) = host {
-            self.downstream_addrs
-                .iter()
-                .any(|addr| addr.ip() == *ip && addr.port() == port)
-        } else {
-            false
-        }
-    }
 }
 
 impl MessageInspector for ProxyMessageInspector {
     fn before_send(&self, msg: SipMessage) -> SipMessage {
         match msg {
             SipMessage::Request(mut req) => {
-                if self.is_downstream_request(&req) {
-                    req.headers.retain(|header| {
-                        !matches!(
-                            header,
-                            rsip::Header::Route(_) | rsip::Header::RecordRoute(_)
-                        )
-                    });
-                }
                 if let Ok(via) = req.via_header_mut() {
                     Self::strip_rport(via);
                 }
@@ -200,7 +162,7 @@ impl SipBackend for RsipstackBackend {
         endpoint_builder
             .with_cancel_token(cancel.clone())
             .with_transport_layer(transport_layer)
-            .with_inspector(Box::new(ProxyMessageInspector::new(vec![downstream_canonical])));
+            .with_inspector(Box::new(ProxyMessageInspector::default()));
         let endpoint = Arc::new(endpoint_builder.build());
 
         {
@@ -1261,10 +1223,15 @@ impl RsipstackBackend {
     async fn start_client_transaction(
         &self,
         endpoint: Arc<Endpoint>,
-        request: rsip::Request,
+        mut request: rsip::Request,
         target: SipAddr,
         binding: ClientTarget,
     ) -> Result<Transaction> {
+        if matches!(binding, ClientTarget::Downstream) {
+            request.headers.retain(|header| {
+                !matches!(header, rsip::Header::Route(_) | rsip::Header::RecordRoute(_))
+            });
+        }
         let key = TransactionKey::from_request(&request, TransactionRole::Client)
             .map_err(Error::sip_stack)?;
         let connection = match binding {
