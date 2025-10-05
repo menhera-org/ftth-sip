@@ -248,7 +248,10 @@ impl SipBackend for RsipstackBackend {
                                 warn!(error = %err, "failed to process transaction");
                             }
                         }
-                        None => break,
+                        None => {
+                            warn!("Transaction processing terminated");
+                            break;
+                        },
                     }
                 }
             }
