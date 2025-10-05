@@ -50,16 +50,87 @@ use super::utils::{constant_time_eq, md5_hex, strip_rport_param};
 use crate::sip::registration::DownstreamRegistration;
 use tracing::{debug, error, info, warn};
 
-#[derive(Debug, Default)]
-struct ProxyMessageInspector;
+#[derive(Debug)]
+struct ProxyMessageInspector {
+    downstream_addrs: Vec<SocketAddr>,
+}
 
 impl ProxyMessageInspector {
+    fn new(downstream_addrs: Vec<SocketAddr>) -> Self {
+        Self { downstream_addrs }
+    }
+
     fn strip_rport(via: &mut rsip::headers::Via) {
         if let Ok(mut typed) = via.clone().typed() {
             typed.params.retain(|param| {
                 !matches!(param, Param::Other(name, _) if name.value().eq_ignore_ascii_case("rport"))
             });
             *via = typed.into();
+        }
+    }
+
+    fn is_downstream_target(&self, headers: &rsip::Headers) -> bool {
+        let Some(via) = headers.iter().find_map(|header| match header {
+            rsip::Header::Via(v) => Some(v.clone()),
+            _ => None,
+        }) else {
+            return false;
+        };
+
+        let Ok(typed) = via.typed() else {
+            return false;
+        };
+
+        let host = &typed.uri.host_with_port.host;
+        let port = typed
+            .uri
+            .host_with_port
+            .port
+            .map(|p| *p.value())
+            .unwrap_or(5060);
+
+        match host {
+            rsip::host_with_port::Host::IpAddr(ip) => self
+                .downstream_addrs
+                .iter()
+                .any(|addr| addr.ip() == *ip && addr.port() == port),
+            _ => false,
+        }
+    }
+
+    fn strip_routes(headers: &mut rsip::Headers) {
+        headers.retain(|header| match header {
+            rsip::Header::Route(_) | rsip::Header::RecordRoute(_) => false,
+            rsip::Header::Other(name, _)
+                if name.eq_ignore_ascii_case("X-Ftth-Strip-Routes") => false,
+            _ => true,
+        });
+    }
+
+    fn rewrite_contact(&self, headers: &mut rsip::Headers) {
+        if self.downstream_addrs.is_empty() {
+            return;
+        }
+
+        let primary = self.downstream_addrs[0];
+
+        if let Some(contact) = headers.iter_mut().find_map(|header| match header {
+            rsip::Header::Contact(c) => Some(c),
+            _ => None,
+        }) {
+            if let Ok(mut typed) = contact.clone().typed() {
+                let mut uri = Uri::from(primary);
+                uri.scheme = Some(Scheme::Sip);
+                if typed.uri.auth.is_some() {
+                    uri.auth = typed.uri.auth.clone();
+                }
+                typed.uri = uri;
+                *contact = typed.into();
+            } else {
+                let mut uri = Uri::from(primary);
+                uri.scheme = Some(Scheme::Sip);
+                *contact = Contact::from(format!("<{}>", uri));
+            }
         }
     }
 }
@@ -71,22 +142,23 @@ impl MessageInspector for ProxyMessageInspector {
                 let should_strip = req.headers.iter().any(|header| matches!(
                     header,
                     rsip::Header::Other(name, _) if name.eq_ignore_ascii_case("X-Ftth-Strip-Routes")
-                ));
+                )) || self.is_downstream_target(&req.headers);
                 if should_strip {
-                    req.headers.retain(|header| match header {
-                        rsip::Header::Route(_) | rsip::Header::RecordRoute(_) => false,
-                        rsip::Header::Other(name, _)
-                            if name.eq_ignore_ascii_case("X-Ftth-Strip-Routes") => false,
-                        _ => true,
-                    });
-                    debug!("Stripping route-related headers");
+                    Self::strip_routes(&mut req.headers);
+                    self.rewrite_contact(&mut req.headers);
                 }
                 if let Ok(via) = req.via_header_mut() {
                     Self::strip_rport(via);
                 }
                 SipMessage::Request(req)
             }
-            other => other,
+            SipMessage::Response(mut resp) => {
+                if self.is_downstream_target(&resp.headers) {
+                    Self::strip_routes(&mut resp.headers);
+                    self.rewrite_contact(&mut resp.headers);
+                }
+                SipMessage::Response(resp)
+            }
         }
     }
 
@@ -175,7 +247,7 @@ impl SipBackend for RsipstackBackend {
         endpoint_builder
             .with_cancel_token(cancel.clone())
             .with_transport_layer(transport_layer)
-            .with_inspector(Box::new(ProxyMessageInspector::default()));
+            .with_inspector(Box::new(ProxyMessageInspector::new(vec![downstream_canonical])));
         let endpoint = Arc::new(endpoint_builder.build());
 
         {
