@@ -2490,11 +2490,15 @@ impl RsipstackBackend {
 
                 let config = context.config.as_ref();
                 let route_set = { context.route_set.read().await.clone() };
+                let mut upstream_original = tx.original.clone();
+                if let Some(contact) = call.upstream_contact.clone() {
+                    upstream_original.uri = contact;
+                }
                 let upstream_request = Self::prepare_upstream_request(
                     &endpoint,
                     upstream_listener,
                     &config.upstream,
-                    &tx.original,
+                    &upstream_original,
                     None,
                     &call.identity,
                     &route_set,
