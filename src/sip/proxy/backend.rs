@@ -461,6 +461,9 @@ impl RsipstackBackend {
         request
             .headers
             .retain(|header| !matches!(header, rsip::Header::Route(_)));
+        request
+            .headers
+            .retain(|header| !matches!(header, rsip::Header::RecordRoute(_)));
         request.headers.retain(|header| {
             !matches!(header, rsip::Header::Other(name, _) if {
                 let lower = name.to_ascii_lowercase();
