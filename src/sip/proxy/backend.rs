@@ -1683,17 +1683,9 @@ impl RsipstackBackend {
         upstream_tx: Arc<Mutex<Transaction>>,
         media_session: MediaSessionHandle,
         cancel_token: CancellationToken,
-        context: SipContext,
     ) -> Result<(Option<StatusCode>, Option<Response>)> {
         let mut final_status: Option<StatusCode> = None;
         let mut final_response: Option<Response> = None;
-
-        let downstream_listener = {
-            let guard = context.sockets.downstream.lock().await;
-            guard
-                .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
-        };
-        let default_user = context.config.downstream.default_user.as_deref();
 
         loop {
             tokio::select! {
@@ -1710,11 +1702,6 @@ impl RsipstackBackend {
                                     rsip::Header::Route(_) | rsip::Header::RecordRoute(_)
                                 )
                             });
-                            Self::rewrite_contact_for_downstream(
-                                &mut downstream_response.headers,
-                                downstream_listener,
-                                default_user,
-                            );
                             let upstream_via = {
                                 let guard = upstream_tx.lock().await;
                                 guard
@@ -2559,7 +2546,6 @@ impl RsipstackBackend {
                             upstream_tx,
                             media_session,
                             cancel_token,
-                            context_clone.clone(),
                         )
                         .await;
                     backend
