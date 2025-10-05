@@ -168,7 +168,13 @@ impl MediaRelay {
     }
 
     pub async fn release(&self, key: &MediaSessionKey) {
-        if let Some(session) = self.sessions.lock().await.remove(key) {
+        // Ensure the sessions mutex is released before awaiting on session tasks.
+        let session = {
+            let mut sessions = self.sessions.lock().await;
+            sessions.remove(key)
+        };
+
+        if let Some(session) = session {
             session.shutdown.cancel();
             let mut tasks = session.tasks.lock().await;
             for task in tasks.drain(..) {

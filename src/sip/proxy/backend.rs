@@ -13,11 +13,9 @@ use ftth_rsipstack::transaction::transaction::Transaction;
 use ftth_rsipstack::transport::udp::{UdpConnection, UdpInner};
 use ftth_rsipstack::transport::{SipAddr, SipConnection, TransportLayer};
 use rsip::common::uri::{
+    Scheme, UriWithParams, UriWithParamsList,
     auth::Auth as UriAuth,
     param::{OtherParam, OtherParamValue, Tag},
-    Scheme,
-    UriWithParams,
-    UriWithParamsList,
 };
 use rsip::headers::auth::{self, AuthQop, Qop};
 use rsip::headers::{
@@ -66,7 +64,6 @@ impl ProxyMessageInspector {
             *via = typed.into();
         }
     }
-
 }
 
 impl MessageInspector for ProxyMessageInspector {
@@ -167,7 +164,9 @@ impl SipBackend for RsipstackBackend {
         endpoint_builder
             .with_cancel_token(cancel.clone())
             .with_transport_layer(transport_layer)
-            .with_inspector(Box::new(ProxyMessageInspector::new(vec![downstream_canonical])));
+            .with_inspector(Box::new(ProxyMessageInspector::new(vec![
+                downstream_canonical,
+            ])));
         let endpoint = Arc::new(endpoint_builder.build());
 
         {
@@ -448,7 +447,10 @@ impl RsipstackBackend {
         }
 
         request.headers.retain(|header| {
-            !matches!(header, rsip::Header::Route(_) | rsip::Header::RecordRoute(_))
+            !matches!(
+                header,
+                rsip::Header::Route(_) | rsip::Header::RecordRoute(_)
+            )
         });
         let content_length = request.body.len() as u32;
         request.headers.unique_push(rsip::Header::ContentLength(
@@ -470,7 +472,10 @@ impl RsipstackBackend {
             .headers
             .retain(|header| !matches!(header, rsip::Header::From(_)));
         request.headers.retain(|header| {
-            !matches!(header, rsip::Header::Route(_) | rsip::Header::RecordRoute(_))
+            !matches!(
+                header,
+                rsip::Header::Route(_) | rsip::Header::RecordRoute(_)
+            )
         });
         request.headers.retain(|header| {
             !matches!(header, rsip::Header::Other(name, _) if {
@@ -1039,7 +1044,9 @@ impl RsipstackBackend {
         let is_invite = original.method == Method::Invite;
         let p_called_party_value = if is_invite {
             original.headers.iter().find_map(|header| match header {
-                rsip::Header::Other(name, value) if name.eq_ignore_ascii_case("P-Called-Party-ID") => {
+                rsip::Header::Other(name, value)
+                    if name.eq_ignore_ascii_case("P-Called-Party-ID") =>
+                {
                     Some(value.clone())
                 }
                 _ => None,
@@ -1118,9 +1125,7 @@ impl RsipstackBackend {
                         request
                             .headers
                             .retain(|header| !matches!(header, rsip::Header::To(_)));
-                        request
-                            .headers
-                            .push(rsip::Header::To(typed_to.into()));
+                        request.headers.push(rsip::Header::To(typed_to.into()));
                     }
                 }
             }
@@ -1175,7 +1180,8 @@ impl RsipstackBackend {
             request
                 .headers
                 .unique_push(rsip::Header::Contact(Contact::from(format!(
-                    "<{}>", contact_uri
+                    "<{}>",
+                    contact_uri
                 ))));
         }
 
@@ -1234,7 +1240,10 @@ impl RsipstackBackend {
     ) -> Result<Transaction> {
         if matches!(binding, ClientTarget::Downstream) {
             request.headers.retain(|header| {
-                !matches!(header, rsip::Header::Route(_) | rsip::Header::RecordRoute(_))
+                !matches!(
+                    header,
+                    rsip::Header::Route(_) | rsip::Header::RecordRoute(_)
+                )
             });
         }
         let key = TransactionKey::from_request(&request, TransactionRole::Client)
@@ -1598,8 +1607,7 @@ impl RsipstackBackend {
 
         let downstream_listener = {
             let guard = context.sockets.downstream.lock().await;
-            guard
-                .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
+            guard.unwrap_or_else(|| context.config.downstream.bind.socket_addr())
         };
         let default_user = context.config.downstream.default_user.as_deref();
 
@@ -2464,7 +2472,8 @@ impl RsipstackBackend {
                 } else {
                     config.upstream.default_identity.clone()
                 };
-                let fallback_p_called_party = Self::build_default_called_party_uri(&config.upstream);
+                let fallback_p_called_party =
+                    Self::build_default_called_party_uri(&config.upstream);
 
                 let downstream_contact_clone = downstream_contact.clone();
                 let call_template = CallContext {
@@ -2753,9 +2762,7 @@ impl RsipstackBackend {
         let stored_call = match context.calls.read().await.get(&call_id).cloned() {
             Some(call) => call,
             None => {
-                tx.reply(StatusCode::OK)
-                    .await
-                    .map_err(Error::sip_stack)?;
+                tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
                 return Ok(());
             }
         };
@@ -2773,9 +2780,7 @@ impl RsipstackBackend {
                 debug!(call_id, target = %call.upstream_target, "handle_bye: forwarding downstream BYE upstream");
 
                 // Acknowledge downstream immediately to avoid retransmissions while we forward upstream.
-                tx.reply(StatusCode::OK)
-                    .await
-                    .map_err(Error::sip_stack)?;
+                tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
 
                 let upstream_listener = {
                     let guard = context.sockets.upstream.lock().await;
@@ -2836,9 +2841,7 @@ impl RsipstackBackend {
                 Ok(())
             }
             TransactionDirection::Upstream => {
-                tx.reply(StatusCode::OK)
-                    .await
-                    .map_err(Error::sip_stack)?;
+                tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
                 let mut call = {
                     let mut guard = context.calls.write().await;
                     guard.remove(&call_id).unwrap_or(stored_call)

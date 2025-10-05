@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+//use tokio::task::JoinHandle;
 
 use crate::error::{Error, Result};
 use crate::media::MediaRelayBuilder;
@@ -71,8 +71,8 @@ where
         let backend = self.backend.clone();
         let context = self.context.clone();
 
-        let worker: JoinHandle<Result<()>> = tokio::task::spawn_blocking(move || {
-            let runtime = RuntimeBuilder::new_current_thread()
+        let worker: std::thread::JoinHandle<Result<()>> = std::thread::spawn(move || {
+            let runtime = RuntimeBuilder::new_multi_thread()
                 .enable_all()
                 .build()
                 .map_err(Error::Transport)?;
@@ -93,7 +93,7 @@ where
 
 pub struct ProxyHandle {
     shutdown_tx: watch::Sender<bool>,
-    worker: JoinHandle<Result<()>>,
+    worker: std::thread::JoinHandle<Result<()>>,
 }
 
 impl ProxyHandle {
@@ -106,7 +106,9 @@ impl ProxyHandle {
             shutdown_tx: _,
             worker,
         } = self;
-        match worker.await {
+        let handle = tokio::task::spawn_blocking(move || worker.join().unwrap());
+        let result = handle.await;
+        match result {
             Ok(result) => result,
             Err(join_error) => Err(Error::Media(format!("proxy task panicked: {join_error}"))),
         }
@@ -118,7 +120,9 @@ impl ProxyHandle {
             worker,
         } = self;
         let _ = shutdown_tx.send(true);
-        match worker.await {
+        let handle = tokio::task::spawn_blocking(move || worker.join().unwrap());
+        let result = handle.await;
+        match result {
             Ok(result) => result,
             Err(join_error) => Err(Error::Media(format!("proxy task panicked: {join_error}"))),
         }

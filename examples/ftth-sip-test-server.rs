@@ -244,8 +244,11 @@ impl Cli {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    #[cfg(feature = "console")]
+    console_subscriber::init();
+
     let cli = Cli::parse();
     init_tracing(&cli.log_level)?;
 
