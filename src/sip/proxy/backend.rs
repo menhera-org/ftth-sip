@@ -12,7 +12,12 @@ use ftth_rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use ftth_rsipstack::transaction::transaction::Transaction;
 use ftth_rsipstack::transport::udp::{UdpConnection, UdpInner};
 use ftth_rsipstack::transport::{SipAddr, SipConnection, TransportLayer};
-use rsip::common::uri::{UriWithParams, UriWithParamsList, auth::Auth as UriAuth, param::Tag};
+use rsip::common::uri::{
+    auth::Auth as UriAuth,
+    param::{OtherParam, OtherParamValue, Tag},
+    UriWithParams,
+    UriWithParamsList,
+};
 use rsip::headers::auth::{self, AuthQop, Qop};
 use rsip::headers::{
     CallId as HeaderCallId, Contact, ContentEncoding, ContentLength as HeaderContentLength,
@@ -98,6 +103,12 @@ struct BackendInner {
     registrar: RwLock<Option<Arc<UpstreamRegistrar>>>,
     upstream_transport: RwLock<Option<SipConnection>>,
     downstream_transport: RwLock<Option<SipConnection>>,
+}
+
+#[derive(Debug, Clone)]
+struct InviteIsubRewrite {
+    base_user: String,
+    isub: String,
 }
 
 impl Default for RsipstackBackend {
@@ -291,6 +302,87 @@ impl RsipstackBackend {
         }
     }
 
+    fn detect_invite_isub(uri: &Uri) -> Option<InviteIsubRewrite> {
+        let auth = uri.auth.as_ref()?;
+        let (base_user, isub) = Self::split_trailing_isub(&auth.user)?;
+        Some(InviteIsubRewrite { base_user, isub })
+    }
+
+    fn split_trailing_isub(user: &str) -> Option<(String, String)> {
+        if let Some((base, suffix)) = Self::split_trailing_isub_with_marker(user, '*', 1) {
+            return Some((base, suffix));
+        }
+
+        let lower = user.to_ascii_lowercase();
+        if let Some(index) = lower.rfind("%2a") {
+            return Self::split_trailing_isub_at(user, index, 3);
+        }
+
+        None
+    }
+
+    fn split_trailing_isub_with_marker(
+        user: &str,
+        marker: char,
+        marker_len: usize,
+    ) -> Option<(String, String)> {
+        let pos = user.rfind(marker)?;
+        Self::split_trailing_isub_at(user, pos, marker_len)
+    }
+
+    fn split_trailing_isub_at(
+        user: &str,
+        marker_index: usize,
+        marker_len: usize,
+    ) -> Option<(String, String)> {
+        let start_suffix = marker_index + marker_len;
+        if start_suffix > user.len() {
+            return None;
+        }
+        let suffix = &user[start_suffix..];
+        if Self::is_valid_isub_suffix(suffix) {
+            let base = user[..marker_index].to_string();
+            return Some((base, suffix.to_string()));
+        }
+        None
+    }
+
+    fn is_valid_isub_suffix(suffix: &str) -> bool {
+        !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit())
+    }
+
+    fn set_isub_param(uri: &mut Uri, value: &str) {
+        if value.is_empty() {
+            return;
+        }
+
+        uri.params.retain(|param| {
+            !matches!(param, Param::Other(name, _) if name.value().eq_ignore_ascii_case("isub"))
+        });
+        uri.params.push(Param::Other(
+            OtherParam::from(String::from("isub")),
+            Some(OtherParamValue::from(value.to_string())),
+        ));
+    }
+
+    fn rewrite_uri_with_isub(uri: &mut Uri, rewrite: &InviteIsubRewrite) {
+        if let Some(auth) = uri.auth.as_mut() {
+            if let Some((base, _)) = Self::split_trailing_isub(&auth.user) {
+                auth.user = base;
+            }
+        }
+        Self::set_isub_param(uri, &rewrite.isub);
+    }
+
+    fn find_isub_param(uri: &Uri) -> Option<String> {
+        uri.params.iter().find_map(|param| match param {
+            Param::Other(name, Some(value)) if name.value().eq_ignore_ascii_case("isub") => {
+                Some(value.value().to_string())
+            }
+            _ => None,
+        })
+    }
+
     fn prepare_upstream_request(
         endpoint: &Endpoint,
         upstream_listener: SocketAddr,
@@ -299,6 +391,7 @@ impl RsipstackBackend {
         body_override: Option<Vec<u8>>,
         identity: &str,
         route_set: &[UriWithParams],
+        invite_isub: Option<&InviteIsubRewrite>,
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
 
@@ -358,6 +451,12 @@ impl RsipstackBackend {
         request.uri.host_with_port = host_with_port;
         let to_host_with_port = request.uri.host_with_port.clone();
 
+        if request.method == Method::Invite {
+            if let Some(rewrite) = invite_isub {
+                Self::rewrite_uri_with_isub(&mut request.uri, rewrite);
+            }
+        }
+
         let via_ip = if upstream_config.bind.address.is_unspecified() {
             upstream_listener.ip()
         } else {
@@ -403,6 +502,11 @@ impl RsipstackBackend {
             .and_then(|header| header.typed().ok())
         {
             typed_to.uri.host_with_port = to_host_with_port;
+            if request.method == Method::Invite {
+                if let Some(rewrite) = invite_isub {
+                    Self::rewrite_uri_with_isub(&mut typed_to.uri, rewrite);
+                }
+            }
             request
                 .headers
                 .unique_push(rsip::Header::To(typed_to.into()));
@@ -886,6 +990,13 @@ impl RsipstackBackend {
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
 
+        let is_invite = original.method == Method::Invite;
+        let invite_isub = if is_invite {
+            Self::find_isub_param(&original.uri)
+        } else {
+            None
+        };
+
         if let Some(body) = body_override {
             request.body = body;
         }
@@ -916,7 +1027,29 @@ impl RsipstackBackend {
                 target_uri.auth = Some(UriAuth::from((user, Option::<String>::None)));
             }
         }
+
+        if is_invite {
+            if let Some(isub) = invite_isub.as_ref() {
+                Self::set_isub_param(&mut target_uri, isub);
+            }
+        }
         request.uri = target_uri;
+
+        if is_invite {
+            if let Some(isub) = invite_isub.as_ref() {
+                if let Ok(header_to) = request.to_header() {
+                    if let Ok(mut typed_to) = header_to.typed() {
+                        Self::set_isub_param(&mut typed_to.uri, isub);
+                        request
+                            .headers
+                            .retain(|header| !matches!(header, rsip::Header::To(_)));
+                        request
+                            .headers
+                            .push(rsip::Header::To(typed_to.into()));
+                    }
+                }
+            }
+        }
 
         let original_uri_string = original_uri.to_string();
         let has_original_uri_header = request.headers.iter().any(|header| match header {
@@ -1060,6 +1193,16 @@ impl RsipstackBackend {
                     }
                 }
 
+                let invite_isub = Self::detect_invite_isub(&tx.original.uri);
+                if let Some(rewrite) = invite_isub.as_ref() {
+                    if rewrite.base_user.is_empty() {
+                        tx.reply(StatusCode::NotFound)
+                            .await
+                            .map_err(Error::sip_stack)?;
+                        return Ok(());
+                    }
+                }
+
                 let endpoint = {
                     let guard = self.inner.endpoint.read().await;
                     guard
@@ -1098,6 +1241,7 @@ impl RsipstackBackend {
                     body_override,
                     &call.identity,
                     &route_set,
+                    invite_isub.as_ref(),
                 )?;
 
                 let mut client_tx = self
@@ -1914,6 +2058,16 @@ impl RsipstackBackend {
                     }
                 };
 
+                let invite_isub = Self::detect_invite_isub(&tx.original.uri);
+                if let Some(rewrite) = invite_isub.as_ref() {
+                    if rewrite.base_user.is_empty() {
+                        tx.reply(StatusCode::NotFound)
+                            .await
+                            .map_err(Error::sip_stack)?;
+                        return Ok(());
+                    }
+                }
+
                 let registration_source = {
                     let guard = context.registrations.read().await;
                     guard.get().map(|reg| reg.source)
@@ -1984,6 +2138,7 @@ impl RsipstackBackend {
                     rewritten_body,
                     &identity,
                     &route_set,
+                    invite_isub.as_ref(),
                 )?;
 
                 let target = Self::build_trunk_target(&config.upstream);
@@ -2282,6 +2437,7 @@ impl RsipstackBackend {
                     None,
                     &call.identity,
                     &route_set,
+                    None,
                 )?;
 
                 let _ = self
@@ -2460,6 +2616,7 @@ impl RsipstackBackend {
                     None,
                     &call.identity,
                     &route_set,
+                    None,
                 )?;
 
                 let mut client_tx = self
