@@ -439,6 +439,13 @@ impl RsipstackBackend {
             request.body = body;
         }
 
+        request
+            .headers
+            .retain(|header| !matches!(header, rsip::Header::Route(_)));
+        request
+            .headers
+            .retain(|header| !matches!(header, rsip::Header::RecordRoute(_)));
+
         let content_length = request.body.len() as u32;
         request.headers.unique_push(rsip::Header::ContentLength(
             rsip::headers::ContentLength::from(content_length),
