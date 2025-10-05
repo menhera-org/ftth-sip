@@ -1639,6 +1639,12 @@ impl RsipstackBackend {
                     match maybe_message {
                         Some(SipMessage::Response(mut downstream_response)) => {
                             Self::expand_compact_headers(&mut downstream_response.headers);
+                            downstream_response.headers.retain(|header| {
+                                !matches!(
+                                    header,
+                                    rsip::Header::Route(_) | rsip::Header::RecordRoute(_)
+                                )
+                            });
                             let upstream_via = {
                                 let guard = upstream_tx.lock().await;
                                 guard
