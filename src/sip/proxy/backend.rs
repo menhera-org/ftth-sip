@@ -2750,7 +2750,7 @@ impl RsipstackBackend {
         let stored_call = match context.calls.read().await.get(&call_id).cloned() {
             Some(call) => call,
             None => {
-                tx.reply(StatusCode::CallTransactionDoesNotExist)
+                tx.reply(StatusCode::OK)
                     .await
                     .map_err(Error::sip_stack)?;
                 return Ok(());
