@@ -383,6 +383,34 @@ impl RsipstackBackend {
         })
     }
 
+    fn parse_p_called_party_uri(value: &str) -> Option<Uri> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let inner = trimmed.trim_matches(|c| c == '<' || c == '>');
+        if inner.is_empty() {
+            return None;
+        }
+
+        Uri::try_from(inner).ok()
+    }
+
+    fn build_default_called_party_uri(
+        upstream_config: &crate::config::UpstreamConfig,
+    ) -> Option<Uri> {
+        if upstream_config.default_identity.is_empty() {
+            return None;
+        }
+
+        let value = format!(
+            "sip:{}@{}",
+            upstream_config.default_identity, upstream_config.sip_domain
+        );
+        Uri::try_from(value.as_str()).ok()
+    }
+
     fn prepare_upstream_request(
         endpoint: &Endpoint,
         upstream_listener: SocketAddr,
@@ -987,12 +1015,38 @@ impl RsipstackBackend {
         body_override: Option<Vec<u8>>,
         strip_user: bool,
         default_user: Option<&str>,
+        fallback_p_called_party: Option<Uri>,
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
 
         let is_invite = original.method == Method::Invite;
+        let p_called_party_value = if is_invite {
+            original.headers.iter().find_map(|header| match header {
+                rsip::Header::Other(name, value) if name.eq_ignore_ascii_case("P-Called-Party-ID") => {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+        } else {
+            None
+        };
+
+        let p_called_party_uri = p_called_party_value
+            .as_deref()
+            .and_then(Self::parse_p_called_party_uri);
+
+        let fallback_isub = if is_invite {
+            fallback_p_called_party
+                .as_ref()
+                .and_then(|uri| Self::find_isub_param(uri))
+        } else {
+            None
+        };
         let invite_isub = if is_invite {
-            Self::find_isub_param(&original.uri)
+            p_called_party_uri
+                .as_ref()
+                .and_then(|uri| Self::find_isub_param(uri))
+                .or_else(|| fallback_isub.clone())
         } else {
             None
         };
@@ -1068,10 +1122,12 @@ impl RsipstackBackend {
             _ => false,
         });
         if !has_p_called_party {
-            request.headers.push(rsip::Header::Other(
-                "P-Called-Party-ID".into(),
-                format!("<{}>", original_uri_string),
-            ));
+            if let Some(uri) = fallback_p_called_party.as_ref() {
+                request.headers.push(rsip::Header::Other(
+                    "P-Called-Party-ID".into(),
+                    format!("<{}>", uri),
+                ));
+            }
         }
 
         if let Some(contact) = &call.downstream_contact {
@@ -1348,6 +1404,8 @@ impl RsipstackBackend {
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
                 let default_user = context.config.downstream.default_user.as_deref();
+                let fallback_p_called_party =
+                    Self::build_default_called_party_uri(&context.config.upstream);
 
                 let downstream_request = Self::prepare_downstream_request(
                     &endpoint,
@@ -1357,6 +1415,7 @@ impl RsipstackBackend {
                     body_override,
                     false,
                     default_user,
+                    fallback_p_called_party,
                 )?;
 
                 let mut client_tx = self
@@ -2297,6 +2356,7 @@ impl RsipstackBackend {
                 } else {
                     config.upstream.default_identity.clone()
                 };
+                let fallback_p_called_party = Self::build_default_called_party_uri(&config.upstream);
 
                 let downstream_contact_clone = downstream_contact.clone();
                 let call_template = CallContext {
@@ -2318,6 +2378,7 @@ impl RsipstackBackend {
                     rewritten_body,
                     true,
                     default_user,
+                    fallback_p_called_party,
                 )?;
 
                 let downstream_request_clone = downstream_request.clone();
@@ -2457,6 +2518,8 @@ impl RsipstackBackend {
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
                 let default_user = context.config.downstream.default_user.as_deref();
+                let fallback_p_called_party =
+                    Self::build_default_called_party_uri(&context.config.upstream);
 
                 let downstream_request = Self::prepare_downstream_request(
                     &endpoint,
@@ -2466,6 +2529,7 @@ impl RsipstackBackend {
                     None,
                     false,
                     default_user,
+                    fallback_p_called_party,
                 )?;
 
                 let _ = self
@@ -2703,6 +2767,8 @@ impl RsipstackBackend {
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
                 let default_user = context.config.downstream.default_user.as_deref();
+                let fallback_p_called_party =
+                    Self::build_default_called_party_uri(&context.config.upstream);
 
                 let downstream_request = Self::prepare_downstream_request(
                     &endpoint,
@@ -2712,6 +2778,7 @@ impl RsipstackBackend {
                     body_override,
                     false,
                     default_user,
+                    fallback_p_called_party,
                 )?;
                 debug!(
                     call_id,
