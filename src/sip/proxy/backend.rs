@@ -162,7 +162,8 @@ impl SipBackend for RsipstackBackend {
         endpoint_builder
             .with_cancel_token(cancel.clone())
             .with_transport_layer(transport_layer)
-            .with_inspector(Box::new(ProxyMessageInspector::default()));
+            .with_inspector(Box::new(ProxyMessageInspector::default()))
+            .follow_record_route(false);
         let endpoint = Arc::new(endpoint_builder.build());
 
         {
