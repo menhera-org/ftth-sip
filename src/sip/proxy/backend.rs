@@ -482,7 +482,7 @@ impl RsipstackBackend {
             request
                 .headers
                 .push(rsip::Header::MaxForwards(rsip::headers::MaxForwards::from(
-                    69u32,
+                    70u32,
                 )));
 
             request
@@ -964,7 +964,7 @@ impl RsipstackBackend {
             .ok()
             .and_then(|mf| mf.num().ok())
             .and_then(|value| value.checked_sub(1))
-            .unwrap_or(69);
+            .unwrap_or(70);
         request
             .headers
             .unique_push(rsip::Header::MaxForwards(rsip::headers::MaxForwards::from(
