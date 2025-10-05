@@ -79,6 +79,7 @@ impl MessageInspector for ProxyMessageInspector {
                             if name.eq_ignore_ascii_case("X-Ftth-Strip-Routes") => false,
                         _ => true,
                     });
+                    debug!("Stripping route-related headers");
                 }
                 if let Ok(via) = req.via_header_mut() {
                     Self::strip_rport(via);
@@ -1577,6 +1578,12 @@ impl RsipstackBackend {
                     match maybe_message {
                         Some(SipMessage::Response(mut upstream_response)) => {
                             Self::expand_compact_headers(&mut upstream_response.headers);
+                            upstream_response.headers.retain(|header| {
+                                !matches!(
+                                    header,
+                                    rsip::Header::Route(_) | rsip::Header::RecordRoute(_)
+                                )
+                            });
                             let downstream_via = {
                                 let guard = downstream_tx.lock().await;
                                 guard
