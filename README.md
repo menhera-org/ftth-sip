@@ -1,6 +1,13 @@
 # ftth-sip
 SIP proxy / media proxy component for FTTH suite of CPE software, in Rust.
 
+## NTT NGN usage
+```bash
+# Fetch information with `ftth-dhcp` and configure interfaces with `ftth-rtnl`.
+# As root
+ftth-sip-test-server --upstream-registrar-uri sip:{ntt_domain} --upstream-domain {ntt_domain} --upstream-trunk-ip {sip_server} --downstream-username asterisk --downstream-bind-addr {lan_ip} --downstream-bind-port 5060 --upstream-default-identity {ntt_main_number} --allowed-identity {ntt_additional_numner} --allowed-identity {...} --upstream-bind-addr {ngn_dhcp4_addr} --upstream-bind-port 5060 --upstream-interface {ngn_interface} --media-port-min 50000 --media-port-max 60000 --media-upstream-interface {ngn_interface} --downstream-default-user s --registration-refresh 3600
+```
+
 ## Quick start
 
 The example harness wires the proxy together with a single downstream PBX. The
