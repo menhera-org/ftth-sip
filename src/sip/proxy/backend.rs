@@ -15,6 +15,7 @@ use ftth_rsipstack::transport::{SipAddr, SipConnection, TransportLayer};
 use rsip::common::uri::{
     auth::Auth as UriAuth,
     param::{OtherParam, OtherParamValue, Tag},
+    Scheme,
     UriWithParams,
     UriWithParamsList,
 };
@@ -1151,6 +1152,7 @@ impl RsipstackBackend {
 
         if !downstream_listener.ip().is_unspecified() {
             let mut contact_uri = Uri::from(downstream_listener);
+            contact_uri.scheme = Some(Scheme::Sip);
             contact_uri.auth = Some(UriAuth::from((contact_user, Option::<String>::None)));
             request
                 .headers
