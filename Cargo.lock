@@ -392,9 +392,9 @@ dependencies = [
 
 [[package]]
 name = "ftth-rsipstack"
-version = "3.0.0"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbfcdafec05fba700f614612c6d73885da15b74bae87753e92d0dec072d9389f"
+checksum = "19f61eac1fd4983eba7fdad1898cb41a1b7183f617b38bf031aa0a286ae628f5"
 dependencies = [
  "async-trait",
  "bytes",
@@ -406,7 +406,6 @@ dependencies = [
  "http",
  "log",
  "rand",
- "rsip",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -1028,21 +1027,6 @@ name = "regex-syntax"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caf4aa5b0f434c91fe5c7f1ecb6a5ece2130b02ad2a590589dda5146df959001"
-
-[[package]]
-name = "rsip"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1690d2cc1b13c9ff67f48f59bd2b0bb9bb57e157b5cce2d0b27ccf8e11964c3"
-dependencies = [
- "bstr",
- "bytes",
- "md-5",
- "nom",
- "rsip-derives",
- "sha2",
- "uuid",
-]
 
 [[package]]
 name = "rsip-derives"
