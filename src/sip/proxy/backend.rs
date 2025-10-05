@@ -1061,6 +1061,10 @@ impl RsipstackBackend {
             request.body = body;
         }
 
+        request
+            .headers
+            .retain(|header| !matches!(header, rsip::Header::Route(_)));
+
         let original_uri = request.uri.clone();
 
         let content_length = request.body.len() as u32;
