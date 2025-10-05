@@ -392,9 +392,9 @@ dependencies = [
 
 [[package]]
 name = "ftth-rsipstack"
-version = "4.0.0"
+version = "4.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19f61eac1fd4983eba7fdad1898cb41a1b7183f617b38bf031aa0a286ae628f5"
+checksum = "f8f1a7cc741dd8c372a9a82bec6e458aac1a3cc8e672b3cef2c1a1d1ee20aa30"
 dependencies = [
  "async-trait",
  "bytes",
