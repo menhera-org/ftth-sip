@@ -2750,6 +2750,11 @@ impl RsipstackBackend {
                 };
                 debug!(call_id, target = %call.upstream_target, "handle_bye: forwarding downstream BYE upstream");
 
+                // Acknowledge downstream immediately to avoid retransmissions while we forward upstream.
+                tx.reply(StatusCode::OK)
+                    .await
+                    .map_err(Error::sip_stack)?;
+
                 let upstream_listener = {
                     let guard = context.sockets.upstream.lock().await;
                     guard
@@ -2780,7 +2785,7 @@ impl RsipstackBackend {
                     )
                     .await?;
 
-                let mut responded = false;
+                let mut released = false;
                 while let Some(message) = client_tx.receive().await {
                     match message {
                         SipMessage::Response(mut response) => {
@@ -2790,27 +2795,20 @@ impl RsipstackBackend {
                                 "handle_bye: upstream response to downstream BYE"
                             );
                             Self::expand_compact_headers(&mut response.headers);
-                            let status = response.status_code.clone();
-                            tx.respond(response).await.map_err(Error::sip_stack)?;
-                            responded = true;
-                            if matches!(status.kind(), StatusCodeKind::Provisional) {
-                                continue;
-                            }
-                            if matches!(status.kind(), StatusCodeKind::Successful) {
+                            if matches!(response.status_code.kind(), StatusCodeKind::Successful) {
                                 context.media.release(&call.media_key).await;
                                 context.calls.write().await.remove(&call_id);
+                                released = true;
+                                break;
                             }
-                            break;
                         }
                         SipMessage::Request(_) => {}
                     }
                 }
 
-                if !responded {
-                    debug!(call_id, "handle_bye: upstream BYE timed out");
-                    tx.reply(StatusCode::RequestTimeout)
-                        .await
-                        .map_err(Error::sip_stack)?;
+                if !released {
+                    context.media.release(&call.media_key).await;
+                    context.calls.write().await.remove(&call_id);
                 }
 
                 Ok(())
