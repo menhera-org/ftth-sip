@@ -45,7 +45,7 @@ use super::registrar::UpstreamRegistrar;
 use super::state::{
     CallContext, InboundPendingInvite, OutboundPendingInvite, PendingInvite, SipContext,
 };
-use super::utils::{constant_time_eq, md5_hex, strip_rport_param};
+use super::utils::{constant_time_eq, format_socket_for_sip, md5_hex, strip_rport_param};
 use crate::sip::registration::DownstreamRegistration;
 use tracing::{debug, error, info, warn};
 
@@ -1135,13 +1135,33 @@ impl RsipstackBackend {
             }
         }
 
-        if let Some(contact) = &call.downstream_contact {
-            request
-                .headers
-                .unique_push(rsip::Header::Contact(Contact::from(format!(
-                    "<{}>",
-                    contact
-                ))));
+        let contact_user = if strip_user {
+            default_user.unwrap_or_else(|| {
+                if call.identity.is_empty() {
+                    "proxy"
+                } else {
+                    call.identity.as_str()
+                }
+            })
+        } else if call.identity.is_empty() {
+            "proxy"
+        } else {
+            call.identity.as_str()
+        };
+
+        if !downstream_listener.ip().is_unspecified() {
+            let contact_host = format_socket_for_sip(&downstream_listener);
+            let contact_uri_string = format!("sip:{}@{}", contact_user, contact_host);
+            if let Ok(contact_uri) = Uri::try_from(contact_uri_string.as_str()) {
+                request
+                    .headers
+                    .retain(|header| !matches!(header, rsip::Header::Contact(_)));
+                request
+                    .headers
+                    .unique_push(rsip::Header::Contact(Contact::from(format!(
+                        "<{}>", contact_uri
+                    ))));
+            }
         }
 
         let mut via_addr: SipAddr = downstream_listener.into();
