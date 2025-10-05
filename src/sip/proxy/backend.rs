@@ -162,8 +162,7 @@ impl SipBackend for RsipstackBackend {
         endpoint_builder
             .with_cancel_token(cancel.clone())
             .with_transport_layer(transport_layer)
-            .with_inspector(Box::new(ProxyMessageInspector::default()))
-            .follow_record_route(false);
+            .with_inspector(Box::new(ProxyMessageInspector::default()));
         let endpoint = Arc::new(endpoint_builder.build());
 
         {
@@ -440,13 +439,9 @@ impl RsipstackBackend {
             request.body = body;
         }
 
-        request
-            .headers
-            .retain(|header| !matches!(header, rsip::Header::Route(_)));
-        request
-            .headers
-            .retain(|header| !matches!(header, rsip::Header::RecordRoute(_)));
-
+        request.headers.retain(|header| {
+            !matches!(header, rsip::Header::Route(_) | rsip::Header::RecordRoute(_))
+        });
         let content_length = request.body.len() as u32;
         request.headers.unique_push(rsip::Header::ContentLength(
             rsip::headers::ContentLength::from(content_length),
