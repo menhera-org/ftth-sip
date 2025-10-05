@@ -420,6 +420,7 @@ impl RsipstackBackend {
         identity: &str,
         route_set: &[UriWithParams],
         invite_isub: Option<&InviteIsubRewrite>,
+        target_contact: Option<&Uri>,
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
 
@@ -538,6 +539,10 @@ impl RsipstackBackend {
             request
                 .headers
                 .unique_push(rsip::Header::To(typed_to.into()));
+        }
+
+        if let Some(contact) = target_contact {
+            request.uri = contact.clone();
         }
 
         let contact_ip = if upstream_config.bind.address.is_unspecified() {
@@ -1298,6 +1303,7 @@ impl RsipstackBackend {
                     &call.identity,
                     &route_set,
                     invite_isub.as_ref(),
+                    call.upstream_contact.as_ref(),
                 )?;
 
                 let mut client_tx = self
@@ -2198,6 +2204,7 @@ impl RsipstackBackend {
                     &identity,
                     &route_set,
                     invite_isub.as_ref(),
+                    None,
                 )?;
 
                 let target = Self::build_trunk_target(&config.upstream);
@@ -2490,19 +2497,16 @@ impl RsipstackBackend {
 
                 let config = context.config.as_ref();
                 let route_set = { context.route_set.read().await.clone() };
-                let mut upstream_original = tx.original.clone();
-                if let Some(contact) = call.upstream_contact.clone() {
-                    upstream_original.uri = contact;
-                }
                 let upstream_request = Self::prepare_upstream_request(
                     &endpoint,
                     upstream_listener,
                     &config.upstream,
-                    &upstream_original,
+                    &tx.original,
                     None,
                     &call.identity,
                     &route_set,
                     None,
+                    call.upstream_contact.as_ref(),
                 )?;
 
                 let _ = self
@@ -2685,6 +2689,7 @@ impl RsipstackBackend {
                     &call.identity,
                     &route_set,
                     None,
+                    call.upstream_contact.as_ref(),
                 )?;
 
                 let mut client_tx = self
