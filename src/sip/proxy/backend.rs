@@ -2836,6 +2836,9 @@ impl RsipstackBackend {
                 Ok(())
             }
             TransactionDirection::Upstream => {
+                tx.reply(StatusCode::OK)
+                    .await
+                    .map_err(Error::sip_stack)?;
                 let mut call = {
                     let mut guard = context.calls.write().await;
                     guard.remove(&call_id).unwrap_or(stored_call)
