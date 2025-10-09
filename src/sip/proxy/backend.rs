@@ -2703,7 +2703,6 @@ impl RsipstackBackend {
                         .clone()
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
-                let default_user = context.config.downstream.default_user.as_deref();
                 let fallback_p_called_party =
                     Self::build_default_called_party_uri(&config.upstream);
 
@@ -2770,7 +2769,7 @@ impl RsipstackBackend {
                     &original_request,
                     rewritten_body,
                     true,
-                    default_user,
+                    Some(identity.as_str()),
                     fallback_p_called_party,
                 )?;
 
