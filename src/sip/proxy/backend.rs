@@ -224,36 +224,46 @@ impl SipBackend for RsipstackBackend {
 
         loop {
             info!("backend: waiting for next transaction");
+            let mut exit_after_iteration = false;
+
             tokio::select! {
                 _ = shutdown.recv() => {
                     endpoint.shutdown();
-                    break;
+                    exit_after_iteration = true;
                 }
                 _ = &mut endpoint_task => {
                     warn!("endpoint serve loop exited");
-                    break;
+                    exit_after_iteration = true;
                 }
                 maybe_tx = incoming.recv() => {
                     match maybe_tx {
                         Some(tx) => {
-                            if let Err(err) = self
-                                .process_transaction(
-                                    context.clone(),
-                                    tx,
-                                    downstream_listener,
-                                    upstream_listener,
-                                )
-                                .await
-                            {
-                                warn!(error = %err, "failed to process transaction");
-                            }
+                            let backend = self.clone();
+                            let context_clone = context.clone();
+                            tokio::spawn(async move {
+                                if let Err(err) = backend
+                                    .process_transaction(
+                                        context_clone,
+                                        tx,
+                                        downstream_listener,
+                                        upstream_listener,
+                                    )
+                                    .await
+                                {
+                                    warn!(error = %err, "failed to process transaction");
+                                }
+                            });
                         }
                         None => {
                             warn!("Transaction processing terminated");
-                            break;
+                            exit_after_iteration = true;
                         },
                     }
                 }
+            }
+
+            if exit_after_iteration {
+                break;
             }
         }
 
