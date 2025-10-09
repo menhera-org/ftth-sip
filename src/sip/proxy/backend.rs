@@ -326,26 +326,12 @@ impl RsipstackBackend {
     }
 
     fn identity_allowed(identity: &str, config: &crate::config::UpstreamConfig) -> bool {
-        fn matches_allowed(candidate: &str, config: &crate::config::UpstreamConfig) -> bool {
-            config
-                .allowed_identities
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(candidate))
-                || (!config.default_identity.is_empty()
-                    && config.default_identity.eq_ignore_ascii_case(candidate))
-        }
-
-        if matches_allowed(identity, config) {
-            return true;
-        }
-
-        if let Some((base, _)) = Self::split_trailing_isub(identity) {
-            if !base.is_empty() && matches_allowed(&base, config) {
-                return true;
-            }
-        }
-
-        false
+        config
+            .allowed_identities
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(identity))
+            || (!config.default_identity.is_empty()
+                && config.default_identity.eq_ignore_ascii_case(identity))
     }
 
     fn preferred_identity_user(
@@ -2734,14 +2720,17 @@ impl RsipstackBackend {
                 let to_user = to_header
                     .as_ref()
                     .and_then(|typed| typed.uri.auth.as_ref().map(|auth| auth.user.clone()));
-                let to_isub = to_header
-                    .as_ref()
-                    .and_then(|typed| Self::find_isub_param(&typed.uri));
                 let identity = to_user
                     .clone()
                     .filter(|user| Self::identity_allowed(user, &config.upstream))
-                    .or_else(|| to_isub.clone())
-                    .or_else(|| Self::find_isub_param(&tx.original.uri));
+                    .or_else(|| {
+                        let default = config.upstream.default_identity.clone();
+                        if default.is_empty() {
+                            None
+                        } else {
+                            Some(default)
+                        }
+                    });
                 let identity = match identity {
                     Some(identity) => identity,
                     None => {
