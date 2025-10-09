@@ -2018,6 +2018,14 @@ impl RsipstackBackend {
                 Ok(())
             }
         }
+        .or_else(|err| {
+            if Self::is_transaction_already_terminated(&err) {
+                debug!(error = %err, "transaction already terminated; treating as handled");
+                Ok(())
+            } else {
+                Err(err)
+            }
+        })
     }
 
     fn determine_direction(
@@ -2044,6 +2052,15 @@ impl RsipstackBackend {
                 "transaction arrived on unknown local address {local_addr}"
             )))
         }
+    }
+
+    fn is_transaction_already_terminated(err: &Error) -> bool {
+        matches!(
+            err,
+            Error::SipStack(msg)
+            if msg.contains("invalid state transition")
+                && msg.contains("Terminated")
+        )
     }
 
     async fn handle_register(
