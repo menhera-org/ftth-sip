@@ -176,20 +176,23 @@ impl MediaRelay {
 
         if let Some(session) = session {
             session.shutdown.cancel();
-            let mut tasks = session.tasks.lock().await;
-            for task in tasks.drain(..) {
+            let drained = {
+                let mut tasks = session.tasks.lock().await;
+                tasks.drain(..).collect::<Vec<_>>()
+            };
+            for task in drained {
                 task.abort();
             }
         }
     }
 
     pub async fn lookup(&self, key: &MediaSessionKey) -> Option<MediaSessionHandle> {
-        self.sessions
-            .lock()
-            .await
-            .get(key)
-            .cloned()
-            .map(|session| MediaSessionHandle { inner: session })
+        let session = {
+            let sessions = self.sessions.lock().await;
+            sessions.get(key).cloned()
+        };
+
+        session.map(|session| MediaSessionHandle { inner: session })
     }
 
     async fn reserve_port(&self) -> u16 {
@@ -350,7 +353,10 @@ impl MediaSession {
                             }
                         };
 
-                        let maybe_expected = expected_source.read().await.clone();
+                        let maybe_expected = {
+                            let guard = expected_source.read().await;
+                            *guard
+                        };
                         if let Some(expected_src) = maybe_expected {
                             if src != expected_src {
                                 tracing::debug!(
@@ -369,7 +375,10 @@ impl MediaSession {
                             *guard = Some(src);
                         }
 
-                        let destination = target_addr.read().await.clone();
+                        let destination = {
+                            let guard = target_addr.read().await;
+                            *guard
+                        };
                         let destination = match destination {
                             Some(addr) => addr,
                             None => {
