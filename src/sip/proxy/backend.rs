@@ -1143,8 +1143,24 @@ impl RsipstackBackend {
         } else {
             None
         };
+        let p_called_party_user = if is_invite {
+            p_called_party_uri
+                .as_ref()
+                .and_then(|uri| uri.auth.as_ref().map(|auth| auth.user.clone()))
+        } else {
+            None
+        };
         let request_uri_isub = if is_invite {
             Self::find_isub_param(&original.uri)
+        } else {
+            None
+        };
+        let to_header_user = if is_invite {
+            original
+                .to_header()
+                .ok()
+                .and_then(|header| header.typed().ok())
+                .and_then(|typed| typed.uri.auth.map(|auth| auth.user))
         } else {
             None
         };
@@ -1171,6 +1187,14 @@ impl RsipstackBackend {
                     .or(request_uri_isub.clone())
                     .or(fallback_isub.clone())
             }
+        } else {
+            None
+        };
+        let target_user = if strip_user {
+            p_called_party_user
+                .clone()
+                .or(to_header_user.clone())
+                .or_else(|| default_user.map(|user| user.to_string()))
         } else {
             None
         };
@@ -1202,8 +1226,8 @@ impl RsipstackBackend {
             uri
         };
         if strip_user {
-            if let Some(user) = default_user {
-                target_uri.auth = Some(UriAuth::from((user, Option::<String>::None)));
+            if let Some(user) = target_user.as_ref() {
+                target_uri.auth = Some(UriAuth::from((user.as_str(), Option::<String>::None)));
             }
         }
 
@@ -1254,13 +1278,15 @@ impl RsipstackBackend {
         }
 
         let contact_user = if strip_user {
-            default_user.unwrap_or_else(|| {
-                if call.identity.is_empty() {
-                    "proxy"
-                } else {
-                    call.identity.as_str()
-                }
-            })
+            target_user
+                .as_deref()
+                .unwrap_or_else(|| {
+                    if call.identity.is_empty() {
+                        "proxy"
+                    } else {
+                        call.identity.as_str()
+                    }
+                })
         } else if call.identity.is_empty() {
             "proxy"
         } else {
