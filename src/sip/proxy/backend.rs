@@ -439,6 +439,7 @@ impl RsipstackBackend {
         identity: &str,
         route_set: &[UriWithParams],
         invite_isub: Option<&InviteIsubRewrite>,
+        upstream_to_tag: Option<&str>,
         target_contact: Option<&Uri>,
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
@@ -563,6 +564,14 @@ impl RsipstackBackend {
                 if let Some(rewrite) = invite_isub {
                     Self::rewrite_uri_with_isub(&mut typed_to.uri, rewrite);
                 }
+            }
+            if let Some(tag_value) = upstream_to_tag {
+                typed_to
+                    .params
+                    .retain(|param| !matches!(param, Param::Tag(_)));
+                typed_to
+                    .params
+                    .push(Param::Tag(Tag::new(tag_value.to_string())));
             }
             request
                 .headers
@@ -1363,6 +1372,7 @@ impl RsipstackBackend {
                     &call.identity,
                     &route_set,
                     invite_isub.as_ref(),
+                    call.upstream_to_tag.as_deref(),
                     call.upstream_contact.as_ref(),
                 )?;
 
@@ -2358,6 +2368,7 @@ impl RsipstackBackend {
                     &route_set,
                     invite_isub.as_ref(),
                     None,
+                    None,
                 )?;
 
                 let target = Self::build_trunk_target(&config.upstream);
@@ -2670,6 +2681,7 @@ impl RsipstackBackend {
                     &call.identity,
                     &route_set,
                     None,
+                    call.upstream_to_tag.as_deref(),
                     call.upstream_contact.as_ref(),
                 )?;
 
@@ -2831,6 +2843,7 @@ impl RsipstackBackend {
                     &pending.identity,
                     &route_set,
                     None,
+                    None,
                     upstream_contact.as_ref(),
                 )?;
 
@@ -2985,6 +2998,7 @@ impl RsipstackBackend {
                     &call.identity,
                     &route_set,
                     None,
+                    call.upstream_to_tag.as_deref(),
                     call.upstream_contact.as_ref(),
                 )?;
 
