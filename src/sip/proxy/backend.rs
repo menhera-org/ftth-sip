@@ -1612,9 +1612,10 @@ impl RsipstackBackend {
         media_session: MediaSessionHandle,
         cancel_token: CancellationToken,
         context: SipContext,
-    ) -> Result<(Option<StatusCode>, Option<Response>)> {
+    ) -> Result<(Option<StatusCode>, Option<Response>, Option<Uri>)> {
         let mut final_status: Option<StatusCode> = None;
         let mut final_response: Option<Response> = None;
+        let mut final_remote_contact: Option<Uri> = None;
 
         let downstream_listener = {
             let guard = context.sockets.downstream.lock().await;
@@ -1630,6 +1631,10 @@ impl RsipstackBackend {
                 maybe_message = client_tx.receive() => {
                     match maybe_message {
                         Some(SipMessage::Response(mut upstream_response)) => {
+                            let remote_contact = upstream_response
+                                .contact_header()
+                                .ok()
+                                .and_then(|header| header.typed().ok().map(|typed| typed.uri));
                             Self::expand_compact_headers(&mut upstream_response.headers);
                             upstream_response.headers.retain(|header| {
                                 !matches!(
@@ -1682,6 +1687,9 @@ impl RsipstackBackend {
                                 StatusCodeKind::Provisional => {}
                                 _ => {
                                     final_status = Some(upstream_response.status_code.clone());
+                                    if matches!(upstream_response.status_code.kind(), StatusCodeKind::Successful) {
+                                        final_remote_contact = remote_contact;
+                                    }
                                     final_response = Some(upstream_response);
                                     break;
                                 }
@@ -1696,7 +1704,7 @@ impl RsipstackBackend {
             }
         }
 
-        Ok((final_status, final_response))
+        Ok((final_status, final_response, final_remote_contact))
     }
 
     async fn forward_downstream_responses(
@@ -1705,9 +1713,10 @@ impl RsipstackBackend {
         upstream_tx: Arc<Mutex<Transaction>>,
         media_session: MediaSessionHandle,
         cancel_token: CancellationToken,
-    ) -> Result<(Option<StatusCode>, Option<Response>)> {
+    ) -> Result<(Option<StatusCode>, Option<Response>, Option<Uri>)> {
         let mut final_status: Option<StatusCode> = None;
         let mut final_response: Option<Response> = None;
+        let mut final_remote_contact: Option<Uri> = None;
 
         loop {
             tokio::select! {
@@ -1717,6 +1726,10 @@ impl RsipstackBackend {
                 maybe_message = client_tx.receive() => {
                     match maybe_message {
                         Some(SipMessage::Response(mut downstream_response)) => {
+                            let remote_contact = downstream_response
+                                .contact_header()
+                                .ok()
+                                .and_then(|header| header.typed().ok().map(|typed| typed.uri));
                             Self::expand_compact_headers(&mut downstream_response.headers);
                             downstream_response.headers.retain(|header| {
                                 !matches!(
@@ -1769,6 +1782,9 @@ impl RsipstackBackend {
                                             "downstream returned 404 Not Found for call"
                                         );
                                     }
+                                    if matches!(downstream_response.status_code.kind(), StatusCodeKind::Successful) {
+                                        final_remote_contact = remote_contact;
+                                    }
                                     final_status = Some(downstream_response.status_code.clone());
                                     final_response = Some(downstream_response);
                                     break;
@@ -1782,14 +1798,14 @@ impl RsipstackBackend {
             }
         }
 
-        Ok((final_status, final_response))
+        Ok((final_status, final_response, final_remote_contact))
     }
 
     async fn finalize_invite_result(
         &self,
         context: SipContext,
         call_id: String,
-        result: Result<(Option<StatusCode>, Option<Response>)>,
+        result: Result<(Option<StatusCode>, Option<Response>, Option<Uri>)>,
     ) {
         let pending_entry = context.pending.write().await.remove(&call_id);
         let Some(pending_entry) = pending_entry else {
@@ -1800,13 +1816,15 @@ impl RsipstackBackend {
             PendingInvite::Outbound(pending) => {
                 pending.cancel_token.cancel();
                 match result {
-                    Ok((Some(status), Some(response)))
+                    Ok((Some(status), Some(response), remote_contact))
                         if matches!(status.kind(), StatusCodeKind::Successful) =>
                     {
-                        let upstream_contact_uri = response
-                            .contact_header()
-                            .ok()
-                            .and_then(|header| header.typed().ok().map(|typed| typed.uri));
+                        let upstream_contact_uri = remote_contact.or_else(|| {
+                            response
+                                .contact_header()
+                                .ok()
+                                .and_then(|header| header.typed().ok().map(|typed| typed.uri))
+                        });
                         let upstream_to_tag = response
                             .to_header()
                             .ok()
@@ -1851,7 +1869,7 @@ impl RsipstackBackend {
         &self,
         context: SipContext,
         call_id: String,
-        result: Result<(Option<StatusCode>, Option<Response>)>,
+        result: Result<(Option<StatusCode>, Option<Response>, Option<Uri>)>,
     ) {
         let pending_entry = context.pending.write().await.remove(&call_id);
         let Some(PendingInvite::Inbound(pending)) = pending_entry else {
@@ -1863,13 +1881,15 @@ impl RsipstackBackend {
         let mut refresh_registration = false;
 
         match result {
-            Ok((Some(status), Some(response)))
+            Ok((Some(status), Some(response), remote_contact))
                 if matches!(status.kind(), StatusCodeKind::Successful) =>
             {
-                let mut downstream_contact = response
-                    .contact_header()
-                    .ok()
-                    .and_then(|header| header.typed().ok().map(|typed| typed.uri));
+                let mut downstream_contact = remote_contact.or_else(|| {
+                    response
+                        .contact_header()
+                        .ok()
+                        .and_then(|header| header.typed().ok().map(|typed| typed.uri))
+                });
                 let downstream_target = downstream_contact
                     .as_ref()
                     .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
