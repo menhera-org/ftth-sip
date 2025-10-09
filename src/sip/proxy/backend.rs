@@ -1136,11 +1136,41 @@ impl RsipstackBackend {
         } else {
             None
         };
-        let invite_isub = if is_invite {
+        let p_called_party_isub = if is_invite {
             p_called_party_uri
                 .as_ref()
                 .and_then(|uri| Self::find_isub_param(uri))
-                .or_else(|| fallback_isub.clone())
+        } else {
+            None
+        };
+        let request_uri_isub = if is_invite {
+            Self::find_isub_param(&original.uri)
+        } else {
+            None
+        };
+        let to_header_isub = if is_invite {
+            original
+                .to_header()
+                .ok()
+                .and_then(|header| header.typed().ok())
+                .and_then(|typed| Self::find_isub_param(&typed.uri))
+        } else {
+            None
+        };
+        let invite_isub = if is_invite {
+            if strip_user {
+                to_header_isub
+                    .clone()
+                    .or(p_called_party_isub.clone())
+                    .or(request_uri_isub.clone())
+                    .or(fallback_isub.clone())
+            } else {
+                p_called_party_isub
+                    .clone()
+                    .or(request_uri_isub.clone())
+                    .or(to_header_isub.clone())
+                    .or(fallback_isub.clone())
+            }
         } else {
             None
         };
