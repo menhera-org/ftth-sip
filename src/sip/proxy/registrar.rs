@@ -339,13 +339,8 @@ impl UpstreamRegistrar {
             .and_then(|header| header.seconds().ok().map(|value| value as u64))
             .unwrap_or(fallback);
 
-        let refresh_secs = if expires > 30 {
-            expires - 10
-        } else if expires > 5 {
-            ((expires as f64) * 0.8).round() as u64
-        } else {
-            1
-        };
+        // NTT NGN requires re-REGISTER after 40% of the reported expires interval.
+        let refresh_secs = expires.checked_mul(2).unwrap_or(u64::MAX).saturating_add(4) / 5;
 
         Ok(Duration::from_secs(refresh_secs.max(1)))
     }
