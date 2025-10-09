@@ -1159,16 +1159,16 @@ impl RsipstackBackend {
         };
         let invite_isub = if is_invite {
             if strip_user {
-                to_header_isub
+                p_called_party_isub
                     .clone()
-                    .or(p_called_party_isub.clone())
+                    .or(to_header_isub.clone())
                     .or(request_uri_isub.clone())
                     .or(fallback_isub.clone())
             } else {
                 p_called_party_isub
                     .clone()
-                    .or(request_uri_isub.clone())
                     .or(to_header_isub.clone())
+                    .or(request_uri_isub.clone())
                     .or(fallback_isub.clone())
             }
         } else {
