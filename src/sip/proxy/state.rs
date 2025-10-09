@@ -16,6 +16,7 @@ use crate::media::{MediaRelay, MediaSessionHandle, MediaSessionKey};
 
 use super::utils::md5_hex;
 use crate::sip::registration::RegistrationCache;
+use rsip::common::uri::param::Tag;
 
 #[derive(Debug, Clone)]
 pub struct SipContext {
@@ -42,8 +43,11 @@ pub struct CallContext {
     pub upstream_target: SipAddr,
     pub upstream_contact: Option<rsip::Uri>,
     pub downstream_contact: Option<rsip::Uri>,
-    pub upstream_to_tag: Option<String>,
+    pub upstream_local_tag: Tag,
+    pub upstream_remote_tag: Option<Tag>,
     pub downstream_target: SipAddr,
+    pub downstream_local_tag: Option<Tag>,
+    pub upstream_request_uri: rsip::Uri,
     pub identity: String,
 }
 
@@ -102,11 +106,15 @@ pub(super) struct OutboundPendingInvite {
     pub(super) media_key: MediaSessionKey,
     pub(super) upstream_target: SipAddr,
     pub(super) downstream_contact: Option<rsip::Uri>,
+    pub(super) downstream_local_tag: Option<Tag>,
     pub(super) cancel_token: CancellationToken,
     pub(super) endpoint: Arc<Endpoint>,
     pub(super) upstream_request: rsip::Request,
     pub(super) downstream_target: SipAddr,
     pub(super) identity: String,
+    pub(super) upstream_local_tag: Tag,
+    pub(super) upstream_remote_tag: Option<Tag>,
+    pub(super) upstream_request_uri: rsip::Uri,
 }
 
 #[derive(Clone)]
@@ -116,11 +124,15 @@ pub(super) struct InboundPendingInvite {
     pub(super) media_key: MediaSessionKey,
     pub(super) downstream_target: SipAddr,
     pub(super) downstream_contact: Option<rsip::Uri>,
+    pub(super) downstream_local_tag: Option<Tag>,
     pub(super) cancel_token: CancellationToken,
     pub(super) endpoint: Arc<Endpoint>,
     pub(super) downstream_request: rsip::Request,
     pub(super) identity: String,
     pub(super) upstream_request: rsip::Request,
+    pub(super) upstream_local_tag: Tag,
+    pub(super) upstream_remote_tag: Option<Tag>,
+    pub(super) upstream_request_uri: rsip::Uri,
 }
 
 impl std::fmt::Debug for PendingInvite {
