@@ -326,12 +326,26 @@ impl RsipstackBackend {
     }
 
     fn identity_allowed(identity: &str, config: &crate::config::UpstreamConfig) -> bool {
-        config
-            .allowed_identities
-            .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(identity))
-            || (!config.default_identity.is_empty()
-                && config.default_identity.eq_ignore_ascii_case(identity))
+        fn matches_allowed(candidate: &str, config: &crate::config::UpstreamConfig) -> bool {
+            config
+                .allowed_identities
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(candidate))
+                || (!config.default_identity.is_empty()
+                    && config.default_identity.eq_ignore_ascii_case(candidate))
+        }
+
+        if matches_allowed(identity, config) {
+            return true;
+        }
+
+        if let Some((base, _)) = Self::split_trailing_isub(identity) {
+            if !base.is_empty() && matches_allowed(&base, config) {
+                return true;
+            }
+        }
+
+        false
     }
 
     fn preferred_identity_user(
