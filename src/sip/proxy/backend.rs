@@ -2726,15 +2726,8 @@ impl RsipstackBackend {
                 let identity = to_user
                     .clone()
                     .filter(|user| Self::identity_allowed(user, &config.upstream))
-                    .or_else(|| {
-                        to_isub
-                            .clone()
-                            .filter(|value| Self::identity_allowed(value, &config.upstream))
-                    })
-                    .or_else(|| {
-                        Self::find_isub_param(&tx.original.uri)
-                            .filter(|value| Self::identity_allowed(value, &config.upstream))
-                    });
+                    .or_else(|| to_isub.clone())
+                    .or_else(|| Self::find_isub_param(&tx.original.uri));
                 let identity = match identity {
                     Some(identity) => identity,
                     None => {
