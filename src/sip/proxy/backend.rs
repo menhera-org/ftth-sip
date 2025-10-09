@@ -1754,6 +1754,8 @@ impl RsipstackBackend {
         upstream_tx: Arc<Mutex<Transaction>>,
         media_session: MediaSessionHandle,
         cancel_token: CancellationToken,
+        upstream_local_tag: Tag,
+        upstream_remote_tag: Option<Tag>,
     ) -> Result<(Option<StatusCode>, Option<Response>)> {
         let mut final_status: Option<StatusCode> = None;
         let mut final_response: Option<Response> = None;
@@ -1782,6 +1784,46 @@ impl RsipstackBackend {
                                     .clone()
                             };
                             Self::replace_top_via(&mut downstream_response.headers, upstream_via);
+
+                            // Ensure dialog tags on the upstream leg stay consistent.
+                            if let Some(mut typed_to) = downstream_response
+                                .to_header()
+                                .ok()
+                                .and_then(|header| header.typed().ok())
+                            {
+                                typed_to
+                                    .params
+                                    .retain(|param| !matches!(param, Param::Tag(_)));
+                                typed_to
+                                    .params
+                                    .push(Param::Tag(upstream_local_tag.clone()));
+                                downstream_response.headers.retain(|header| {
+                                    !matches!(header, rsip::Header::To(_))
+                                });
+                                downstream_response
+                                    .headers
+                                    .push(rsip::Header::To(typed_to.into()));
+                            }
+
+                            if let Some(tag) = upstream_remote_tag.as_ref() {
+                                if let Some(mut typed_from) = downstream_response
+                                    .from_header()
+                                    .ok()
+                                    .and_then(|header| header.typed().ok())
+                                {
+                                    typed_from
+                                        .params
+                                        .retain(|param| !matches!(param, Param::Tag(_)));
+                                    typed_from.params.push(Param::Tag(tag.clone()));
+                                    downstream_response.headers.retain(|header| {
+                                        !matches!(header, rsip::Header::From(_))
+                                    });
+                                    downstream_response
+                                        .headers
+                                        .push(rsip::Header::From(typed_from.into()));
+                                }
+                            }
+
                             if !downstream_response.body.is_empty() {
                                 if let Ok(body) = String::from_utf8(downstream_response.body.clone()) {
                                     let rewrite = media_session.rewrite_for_upstream(&body)?;
@@ -2596,6 +2638,9 @@ impl RsipstackBackend {
                     .and_then(|from| from.tag().ok().flatten());
                 let upstream_local_tag = Tag::default();
 
+                let task_upstream_local_tag = upstream_local_tag.clone();
+                let task_upstream_remote_tag = upstream_remote_tag.clone();
+
                 let downstream_contact_clone = downstream_contact.clone();
                 let call_template = CallContext {
                     media: media_session.clone(),
@@ -2661,7 +2706,7 @@ impl RsipstackBackend {
                         identity,
                         upstream_request: original_request,
                         upstream_local_tag: upstream_local_tag.clone(),
-                        upstream_remote_tag,
+                        upstream_remote_tag: upstream_remote_tag.clone(),
                     }),
                 );
 
@@ -2682,6 +2727,8 @@ impl RsipstackBackend {
                             upstream_tx,
                             media_session,
                             cancel_token,
+                            task_upstream_local_tag,
+                            task_upstream_remote_tag,
                         )
                         .await;
                     backend
