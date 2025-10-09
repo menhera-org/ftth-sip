@@ -223,6 +223,7 @@ impl SipBackend for RsipstackBackend {
         let registrar_handle = tokio::spawn(registrar.clone().run());
 
         loop {
+            info!("backend: waiting for next transaction");
             tokio::select! {
                 _ = shutdown.recv() => {
                     endpoint.shutdown();
