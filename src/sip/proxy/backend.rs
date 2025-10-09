@@ -2135,12 +2135,29 @@ impl RsipstackBackend {
             return Ok(());
         }
 
+        let existing_registration = {
+            let guard = context.registrations.read().await;
+            guard.get().cloned()
+        };
+
+        let now = Instant::now();
         let registration = DownstreamRegistration {
             contact,
-            registered_at: Instant::now(),
+            registered_at: now,
             expires_in: Duration::from_secs(expires_secs),
             source: remote_addr,
         };
+
+        let should_trigger_refresh = existing_registration
+            .as_ref()
+            .map(|existing| {
+                let contact_changed =
+                    existing.contact.to_string() != registration.contact.to_string();
+                let source_changed = existing.source != registration.source;
+                let registration_lapsed = !existing.is_active(now);
+                contact_changed || source_changed || registration_lapsed
+            })
+            .unwrap_or(true);
 
         context
             .registrations
@@ -2157,7 +2174,7 @@ impl RsipstackBackend {
 
         tx.reply(StatusCode::OK).await.map_err(Error::sip_stack)?;
 
-        if expires_secs > 0 {
+        if should_trigger_refresh {
             self.trigger_registration_refresh().await;
         }
         Ok(())
