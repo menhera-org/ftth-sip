@@ -46,6 +46,7 @@ pub struct CallContext {
     pub upstream_local_tag: Tag,
     pub upstream_remote_tag: Option<Tag>,
     pub downstream_target: SipAddr,
+    pub upstream_request_uri: rsip::Uri,
     pub identity: String,
 }
 
@@ -111,6 +112,7 @@ pub(super) struct OutboundPendingInvite {
     pub(super) identity: String,
     pub(super) upstream_local_tag: Tag,
     pub(super) upstream_remote_tag: Option<Tag>,
+    pub(super) upstream_request_uri: rsip::Uri,
 }
 
 #[derive(Clone)]
@@ -127,6 +129,7 @@ pub(super) struct InboundPendingInvite {
     pub(super) upstream_request: rsip::Request,
     pub(super) upstream_local_tag: Tag,
     pub(super) upstream_remote_tag: Option<Tag>,
+    pub(super) upstream_request_uri: rsip::Uri,
 }
 
 impl std::fmt::Debug for PendingInvite {
