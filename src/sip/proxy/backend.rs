@@ -702,6 +702,34 @@ impl RsipstackBackend {
                 .push(rsip::Header::MaxForwards(rsip::headers::MaxForwards::from(
                     70u32,
                 )));
+
+            if request.method == Method::Update {
+                request
+                    .headers
+                    .retain(|header| !matches!(header, rsip::Header::Supported(_)));
+                request.headers.retain(|header| {
+                    !matches!(
+                        header,
+                        rsip::Header::Other(name, _)
+                            if name.eq_ignore_ascii_case("Supported")
+                    )
+                });
+                request
+                    .headers
+                    .unique_push(rsip::Header::Supported(Supported::new("timer".to_string())));
+
+                request.headers.retain(|header| {
+                    !matches!(
+                        header,
+                        rsip::Header::Other(name, _)
+                            if name.eq_ignore_ascii_case("Session-Expires")
+                    )
+                });
+                request.headers.push(rsip::Header::Other(
+                    "Session-Expires".into(),
+                    "300;refresher=uac".into(),
+                ));
+            }
         }
 
         Ok(request)
