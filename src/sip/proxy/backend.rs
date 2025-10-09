@@ -2712,15 +2712,32 @@ impl RsipstackBackend {
                     });
 
                 let config = context.config.as_ref();
-                let identity = match tx
+                let to_header = tx
                     .original
                     .to_header()
                     .ok()
-                    .and_then(|header| header.typed().ok())
-                    .and_then(|typed| typed.uri.auth.map(|auth| auth.user))
-                {
-                    Some(user) if Self::identity_allowed(&user, &config.upstream) => user,
-                    _ => {
+                    .and_then(|header| header.typed().ok());
+                let to_user = to_header
+                    .as_ref()
+                    .and_then(|typed| typed.uri.auth.as_ref().map(|auth| auth.user.clone()));
+                let to_isub = to_header
+                    .as_ref()
+                    .and_then(|typed| Self::find_isub_param(&typed.uri));
+                let identity = to_user
+                    .clone()
+                    .filter(|user| Self::identity_allowed(user, &config.upstream))
+                    .or_else(|| {
+                        to_isub
+                            .clone()
+                            .filter(|value| Self::identity_allowed(value, &config.upstream))
+                    })
+                    .or_else(|| {
+                        Self::find_isub_param(&tx.original.uri)
+                            .filter(|value| Self::identity_allowed(value, &config.upstream))
+                    });
+                let identity = match identity {
+                    Some(identity) => identity,
+                    None => {
                         tx.reply(StatusCode::NotFound)
                             .await
                             .map_err(Error::sip_stack)?;
@@ -2775,7 +2792,8 @@ impl RsipstackBackend {
 
                 let task_upstream_local_tag = upstream_local_tag.clone();
                 let task_upstream_remote_tag = upstream_remote_tag.clone();
-                let task_upstream_local_user = identity.clone();
+                let task_upstream_local_user =
+                    to_user.unwrap_or_else(|| identity.clone());
 
                 let downstream_contact_clone = downstream_contact.clone();
                 let call_template = CallContext {
