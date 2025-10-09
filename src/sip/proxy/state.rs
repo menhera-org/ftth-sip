@@ -46,6 +46,7 @@ pub struct CallContext {
     pub upstream_local_tag: Tag,
     pub upstream_remote_tag: Option<Tag>,
     pub downstream_target: SipAddr,
+    pub downstream_local_tag: Option<Tag>,
     pub upstream_request_uri: rsip::Uri,
     pub identity: String,
 }
@@ -105,6 +106,7 @@ pub(super) struct OutboundPendingInvite {
     pub(super) media_key: MediaSessionKey,
     pub(super) upstream_target: SipAddr,
     pub(super) downstream_contact: Option<rsip::Uri>,
+    pub(super) downstream_local_tag: Option<Tag>,
     pub(super) cancel_token: CancellationToken,
     pub(super) endpoint: Arc<Endpoint>,
     pub(super) upstream_request: rsip::Request,
@@ -122,6 +124,7 @@ pub(super) struct InboundPendingInvite {
     pub(super) media_key: MediaSessionKey,
     pub(super) downstream_target: SipAddr,
     pub(super) downstream_contact: Option<rsip::Uri>,
+    pub(super) downstream_local_tag: Option<Tag>,
     pub(super) cancel_token: CancellationToken,
     pub(super) endpoint: Arc<Endpoint>,
     pub(super) downstream_request: rsip::Request,
