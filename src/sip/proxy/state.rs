@@ -15,6 +15,7 @@ use crate::config::ProxyConfig;
 use crate::media::{MediaRelay, MediaSessionHandle, MediaSessionKey};
 
 use super::utils::md5_hex;
+use rsip::common::uri::param::Tag;
 use crate::sip::registration::RegistrationCache;
 
 #[derive(Debug, Clone)]
@@ -42,7 +43,7 @@ pub struct CallContext {
     pub upstream_target: SipAddr,
     pub upstream_contact: Option<rsip::Uri>,
     pub downstream_contact: Option<rsip::Uri>,
-    pub upstream_to_tag: Option<String>,
+    pub upstream_to_tag: Option<Tag>,
     pub downstream_target: SipAddr,
     pub identity: String,
 }

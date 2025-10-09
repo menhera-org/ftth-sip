@@ -439,7 +439,7 @@ impl RsipstackBackend {
         identity: &str,
         route_set: &[UriWithParams],
         invite_isub: Option<&InviteIsubRewrite>,
-        upstream_to_tag: Option<&str>,
+        upstream_to_tag: Option<&Tag>,
         target_contact: Option<&Uri>,
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
@@ -571,7 +571,7 @@ impl RsipstackBackend {
                     .retain(|param| !matches!(param, Param::Tag(_)));
                 typed_to
                     .params
-                    .push(Param::Tag(Tag::new(tag_value.to_string())));
+                    .push(Param::Tag(tag_value.clone()));
             }
             request
                 .headers
@@ -1400,7 +1400,7 @@ impl RsipstackBackend {
                     &call.identity,
                     &route_set,
                     invite_isub.as_ref(),
-                    call.upstream_to_tag.as_deref(),
+                    call.upstream_to_tag.as_ref(),
                     call.upstream_contact.as_ref(),
                 )?;
 
@@ -1848,7 +1848,7 @@ impl RsipstackBackend {
                         let upstream_to_tag = response
                             .to_header()
                             .ok()
-                            .and_then(|to| to.tag().ok().flatten().map(|tag| tag.to_string()));
+                            .and_then(|to| to.tag().ok().flatten());
 
                         context.calls.write().await.insert(
                             call_id,
@@ -1926,7 +1926,7 @@ impl RsipstackBackend {
                 let upstream_to_tag = response
                     .to_header()
                     .ok()
-                    .and_then(|to| to.tag().ok().flatten().map(|tag| tag.to_string()));
+                    .and_then(|to| to.tag().ok().flatten());
 
                 context.calls.write().await.insert(
                     call_id,
@@ -2709,7 +2709,7 @@ impl RsipstackBackend {
                     &call.identity,
                     &route_set,
                     None,
-                    call.upstream_to_tag.as_deref(),
+                    call.upstream_to_tag.as_ref(),
                     call.upstream_contact.as_ref(),
                 )?;
 
@@ -3026,7 +3026,7 @@ impl RsipstackBackend {
                     &call.identity,
                     &route_set,
                     None,
-                    call.upstream_to_tag.as_deref(),
+                    call.upstream_to_tag.as_ref(),
                     call.upstream_contact.as_ref(),
                 )?;
 
