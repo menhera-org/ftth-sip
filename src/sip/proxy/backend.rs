@@ -1793,6 +1793,9 @@ impl RsipstackBackend {
                                 StatusCodeKind::Provisional => {}
                                 _ => {
                                     final_status = Some(upstream_response.status_code.clone());
+                                    if matches!(upstream_response.status_code.kind(), StatusCodeKind::Successful) {
+                                        final_remote_contact = remote_contact;
+                                    }
                                     final_response = Some(upstream_response);
                                     final_remote_contact = raw_contact;
                                     final_remote_tag = raw_remote_tag;
@@ -1944,6 +1947,9 @@ impl RsipstackBackend {
                                             "downstream returned 404 Not Found for call"
                                         );
                                     }
+                                    if matches!(downstream_response.status_code.kind(), StatusCodeKind::Successful) {
+                                        final_remote_contact = remote_contact;
+                                    }
                                     final_status = Some(downstream_response.status_code.clone());
                                     final_response = Some(downstream_response);
                                     final_downstream_tag = original_to_tag;
@@ -2048,10 +2054,12 @@ impl RsipstackBackend {
             Ok((Some(status), Some(response), downstream_tag))
                 if matches!(status.kind(), StatusCodeKind::Successful) =>
             {
-                let mut downstream_contact = response
-                    .contact_header()
-                    .ok()
-                    .and_then(|header| header.typed().ok().map(|typed| typed.uri));
+                let mut downstream_contact = remote_contact.or_else(|| {
+                    response
+                        .contact_header()
+                        .ok()
+                        .and_then(|header| header.typed().ok().map(|typed| typed.uri))
+                });
                 let downstream_target = downstream_contact
                     .as_ref()
                     .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
