@@ -1810,9 +1810,10 @@ impl RsipstackBackend {
         upstream_local_tag: Tag,
         upstream_remote_tag: Option<Tag>,
         upstream_local_user: String,
-    ) -> Result<(Option<StatusCode>, Option<Response>)> {
+    ) -> Result<(Option<StatusCode>, Option<Response>, Option<Tag>)> {
         let mut final_status: Option<StatusCode> = None;
         let mut final_response: Option<Response> = None;
+        let mut final_downstream_tag: Option<Tag> = None;
 
         loop {
             tokio::select! {
@@ -1822,6 +1823,11 @@ impl RsipstackBackend {
                 maybe_message = client_tx.receive() => {
                     match maybe_message {
                         Some(SipMessage::Response(mut downstream_response)) => {
+                            let original_to_tag = downstream_response
+                                .to_header()
+                                .ok()
+                                .and_then(|header| header.tag().ok().flatten());
+
                             Self::expand_compact_headers(&mut downstream_response.headers);
                             downstream_response.headers.retain(|header| {
                                 !matches!(
@@ -1924,6 +1930,7 @@ impl RsipstackBackend {
                                     }
                                     final_status = Some(downstream_response.status_code.clone());
                                     final_response = Some(downstream_response);
+                                    final_downstream_tag = original_to_tag;
                                     break;
                                 }
                             }
@@ -1935,7 +1942,7 @@ impl RsipstackBackend {
             }
         }
 
-        Ok((final_status, final_response))
+        Ok((final_status, final_response, final_downstream_tag))
     }
 
     async fn finalize_invite_result(
@@ -2005,7 +2012,7 @@ impl RsipstackBackend {
         &self,
         context: SipContext,
         call_id: String,
-        result: Result<(Option<StatusCode>, Option<Response>)>,
+        result: Result<(Option<StatusCode>, Option<Response>, Option<Tag>)>,
     ) {
         let pending_entry = context.pending.write().await.remove(&call_id);
         let Some(PendingInvite::Inbound(pending)) = pending_entry else {
@@ -2017,7 +2024,7 @@ impl RsipstackBackend {
         let mut refresh_registration = false;
 
         match result {
-            Ok((Some(status), Some(response)))
+            Ok((Some(status), Some(response), downstream_tag))
                 if matches!(status.kind(), StatusCodeKind::Successful) =>
             {
                 let mut downstream_contact = response
@@ -2033,10 +2040,12 @@ impl RsipstackBackend {
                     downstream_contact = pending.downstream_contact.clone();
                 }
 
-                let downstream_local_tag = response
-                    .to_header()
-                    .ok()
-                    .and_then(|header| header.tag().ok().flatten());
+                let downstream_local_tag = downstream_tag
+                    .or_else(|| {
+                        pending
+                            .downstream_local_tag
+                            .clone()
+                    });
 
                 let upstream_contact = pending
                     .upstream_request
