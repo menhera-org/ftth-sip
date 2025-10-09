@@ -127,7 +127,7 @@ struct Cli {
     media_inactivity_timeout: u64,
 
     /// Seconds to request for upstream registration refresh
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 3600)]
     registration_refresh: u64,
 
     /// Invite transaction timeout in seconds
