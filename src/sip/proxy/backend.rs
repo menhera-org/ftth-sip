@@ -1,5 +1,5 @@
 use std::convert::TryFrom;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1198,6 +1198,8 @@ impl RsipstackBackend {
         } else {
             None
         };
+        let listener_addr =
+            Self::downstream_listener_for_target(downstream_listener, &call.downstream_target);
 
         if let Some(body) = body_override {
             request.body = body;
@@ -1278,23 +1280,21 @@ impl RsipstackBackend {
         }
 
         let contact_user = if strip_user {
-            target_user
-                .as_deref()
-                .unwrap_or_else(|| {
-                    if call.identity.is_empty() {
-                        "proxy"
-                    } else {
-                        call.identity.as_str()
-                    }
-                })
+            target_user.as_deref().unwrap_or_else(|| {
+                if call.identity.is_empty() {
+                    "proxy"
+                } else {
+                    call.identity.as_str()
+                }
+            })
         } else if call.identity.is_empty() {
             "proxy"
         } else {
             call.identity.as_str()
         };
 
-        if !downstream_listener.ip().is_unspecified() {
-            let mut contact_uri = Uri::from(downstream_listener);
+        if !listener_addr.ip().is_unspecified() {
+            let mut contact_uri = Uri::from(listener_addr);
             contact_uri.scheme = Some(Scheme::Sip);
             contact_uri.auth = Some(UriAuth::from((contact_user, Option::<String>::None)));
             request
@@ -1325,7 +1325,7 @@ impl RsipstackBackend {
             }
         }
 
-        let mut via_addr: SipAddr = downstream_listener.into();
+        let mut via_addr: SipAddr = listener_addr.into();
         via_addr.r#type = Some(Transport::Udp);
         let mut via = endpoint
             .inner
@@ -1369,6 +1369,32 @@ impl RsipstackBackend {
         let mut sip: SipAddr = SocketAddr::new(ip, port).into();
         sip.r#type = Some(Transport::Udp);
         Ok(sip)
+    }
+
+    fn downstream_listener_for_target(listener: SocketAddr, target: &SipAddr) -> SocketAddr {
+        if !listener.ip().is_unspecified() {
+            return listener;
+        }
+
+        let target_addr = match target.get_socketaddr() {
+            Ok(addr) => addr,
+            Err(_) => return listener,
+        };
+
+        let bind_addr = match target_addr {
+            SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        };
+
+        if let Ok(socket) = UdpSocket::bind(bind_addr) {
+            if socket.connect(target_addr).is_ok() {
+                if let Ok(local_addr) = socket.local_addr() {
+                    return SocketAddr::new(local_addr.ip(), listener.port());
+                }
+            }
+        }
+
+        listener
     }
 
     async fn start_client_transaction(
@@ -1797,6 +1823,15 @@ impl RsipstackBackend {
                                         .and_then(|header| header.tag().ok().flatten())
                                 });
 
+                            let listener_addr = {
+                                let guard = downstream_tx.lock().await;
+                                guard
+                                    .connection
+                                    .as_ref()
+                                    .and_then(|conn| conn.get_addr().get_socketaddr().ok())
+                                    .unwrap_or(downstream_listener)
+                            };
+
                             Self::expand_compact_headers(&mut upstream_response.headers);
                             upstream_response.headers.retain(|header| {
                                 !matches!(
@@ -1806,7 +1841,7 @@ impl RsipstackBackend {
                             });
                             Self::rewrite_contact_for_downstream(
                                 &mut upstream_response.headers,
-                                downstream_listener,
+                                listener_addr,
                                 default_user,
                             );
                             let downstream_via = {
@@ -2105,9 +2140,9 @@ impl RsipstackBackend {
                 if matches!(status.kind(), StatusCodeKind::Successful) =>
             {
                 let mut downstream_contact = response
-                        .contact_header()
-                        .ok()
-                        .and_then(|header| header.typed().ok().map(|typed| typed.uri));
+                    .contact_header()
+                    .ok()
+                    .and_then(|header| header.typed().ok().map(|typed| typed.uri));
                 let downstream_target = downstream_contact
                     .as_ref()
                     .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
@@ -2814,8 +2849,7 @@ impl RsipstackBackend {
 
                 let task_upstream_local_tag = upstream_local_tag.clone();
                 let task_upstream_remote_tag = upstream_remote_tag.clone();
-                let task_upstream_local_user =
-                    to_user.unwrap_or_else(|| identity.clone());
+                let task_upstream_local_user = to_user.unwrap_or_else(|| identity.clone());
 
                 let downstream_contact_clone = downstream_contact.clone();
                 let call_template = CallContext {
