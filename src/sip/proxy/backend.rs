@@ -293,25 +293,10 @@ impl RsipstackBackend {
         request: &rsip::Request,
         config: &crate::config::UpstreamConfig,
     ) -> Option<String> {
-        let mut allowed: Vec<String> = config.allowed_identities.clone();
-        if !config.default_identity.is_empty()
-            && !allowed
-                .iter()
-                .any(|id| id.eq_ignore_ascii_case(&config.default_identity))
+        if let Some(user) = Self::preferred_identity_user(request, config)
+            .filter(|candidate| Self::identity_allowed(candidate, config))
         {
-            allowed.push(config.default_identity.clone());
-        }
-
-        let user = request
-            .from_header()
-            .ok()
-            .and_then(|header| header.typed().ok())
-            .and_then(|typed| typed.uri.auth.map(|auth| auth.user));
-
-        if let Some(user) = user {
-            if allowed.iter().any(|id| id.eq_ignore_ascii_case(&user)) {
-                return Some(user);
-            }
+            return Some(user);
         }
 
         if config.default_identity.is_empty() {
@@ -319,6 +304,67 @@ impl RsipstackBackend {
         } else {
             Some(config.default_identity.clone())
         }
+    }
+
+    fn identity_allowed(
+        identity: &str,
+        config: &crate::config::UpstreamConfig,
+    ) -> bool {
+        config
+            .allowed_identities
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(identity))
+            || (!config.default_identity.is_empty()
+                && config
+                    .default_identity
+                    .eq_ignore_ascii_case(identity))
+    }
+
+    fn preferred_identity_user(
+        request: &rsip::Request,
+        upstream_config: &crate::config::UpstreamConfig,
+    ) -> Option<String> {
+        request.headers.iter().find_map(|header| match header {
+            rsip::Header::Other(name, value)
+                if name.eq_ignore_ascii_case("P-Preferred-Identity") =>
+            {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+
+                let without_brackets = trimmed.trim_matches(|c| c == '<' || c == '>');
+                if without_brackets.is_empty() {
+                    return None;
+                }
+
+                if without_brackets.starts_with("tel:") {
+                    let user = without_brackets.trim_start_matches("tel:").trim();
+                    if user.is_empty() {
+                        None
+                    } else {
+                        Some(user.to_string())
+                    }
+                } else {
+                    let candidate = if without_brackets.starts_with("sip:") {
+                        without_brackets.to_string()
+                    } else if without_brackets.contains('@') {
+                        format!("sip:{}", without_brackets)
+                    } else {
+                        format!(
+                            "sip:{}@{}",
+                            without_brackets,
+                            upstream_config.sip_domain
+                        )
+                    };
+
+                    Uri::try_from(candidate.as_str())
+                        .ok()
+                        .and_then(|uri| uri.auth.map(|auth| auth.user))
+                }
+            }
+            _ => None,
+        })
     }
 
     fn detect_invite_isub(uri: &Uri) -> Option<InviteIsubRewrite> {
@@ -444,16 +490,6 @@ impl RsipstackBackend {
         target_contact: Option<&Uri>,
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
-
-        let downstream_preferred_identity =
-            original.headers.iter().find_map(|header| match header {
-                rsip::Header::Other(name, value)
-                    if name.eq_ignore_ascii_case("P-Preferred-Identity") =>
-                {
-                    Some(value.clone())
-                }
-                _ => None,
-            });
 
         if let Some(body) = body_override {
             request.body = body;
@@ -600,37 +636,8 @@ impl RsipstackBackend {
             .unique_push(rsip::Header::Contact(contact_header));
 
         if request.method == Method::Invite {
-            let preferred_user = downstream_preferred_identity
-                .and_then(|value| {
-                    let trimmed = value.trim();
-                    if trimmed.is_empty() {
-                        return None;
-                    }
-
-                    let without_brackets = trimmed.trim_matches(|c| c == '<' || c == '>');
-
-                    if without_brackets.starts_with("tel:") {
-                        let user = without_brackets.trim_start_matches("tel:").trim();
-                        if user.is_empty() {
-                            None
-                        } else {
-                            Some(user.to_string())
-                        }
-                    } else {
-                        let candidate = if without_brackets.starts_with("sip:") {
-                            without_brackets.to_string()
-                        } else if without_brackets.contains('@') {
-                            format!("sip:{}", without_brackets)
-                        } else {
-                            format!("sip:{}@{}", without_brackets, upstream_config.sip_domain)
-                        };
-
-                        Uri::try_from(candidate.as_str())
-                            .ok()
-                            .and_then(|uri| uri.auth.map(|auth| auth.user))
-                    }
-                })
-                .filter(|user| !user.is_empty())
+            let preferred_user = Self::preferred_identity_user(original, upstream_config)
+                .filter(|user| Self::identity_allowed(user, upstream_config))
                 .unwrap_or_else(|| identity.to_string());
 
             let p_preferred = format!("<sip:{}@{}>", preferred_user, upstream_config.sip_domain);
@@ -1756,6 +1763,7 @@ impl RsipstackBackend {
         cancel_token: CancellationToken,
         upstream_local_tag: Tag,
         upstream_remote_tag: Option<Tag>,
+        upstream_local_user: String,
     ) -> Result<(Option<StatusCode>, Option<Response>)> {
         let mut final_status: Option<StatusCode> = None;
         let mut final_response: Option<Response> = None;
@@ -1791,6 +1799,14 @@ impl RsipstackBackend {
                                 .ok()
                                 .and_then(|header| header.typed().ok())
                             {
+                                if let Some(auth) = typed_to.uri.auth.as_mut() {
+                                    auth.user = upstream_local_user.clone();
+                                } else {
+                                    typed_to.uri.auth = Some(UriAuth::from((
+                                        upstream_local_user.clone(),
+                                        Option::<String>::None,
+                                    )));
+                                }
                                 typed_to
                                     .params
                                     .retain(|param| !matches!(param, Param::Tag(_)));
@@ -2582,6 +2598,32 @@ impl RsipstackBackend {
                         sip
                     });
 
+                let config = context.config.as_ref();
+                let identity = match tx
+                    .original
+                    .to_header()
+                    .ok()
+                    .and_then(|header| header.typed().ok())
+                    .and_then(|typed| typed.uri.auth.map(|auth| auth.user))
+                {
+                    Some(user) if Self::identity_allowed(&user, &config.upstream) => user,
+                    _ => {
+                        tx.reply(StatusCode::NotFound)
+                            .await
+                            .map_err(Error::sip_stack)?;
+                        return Ok(());
+                    }
+                };
+                let downstream_listener = {
+                    let guard = context.sockets.downstream.lock().await;
+                    guard
+                        .clone()
+                        .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
+                };
+                let default_user = context.config.downstream.default_user.as_deref();
+                let fallback_p_called_party =
+                    Self::build_default_called_party_uri(&config.upstream);
+
                 let upstream_tx = Arc::new(Mutex::new(tx));
                 let original_request = {
                     let mut guard = upstream_tx.lock().await;
@@ -2612,26 +2654,6 @@ impl RsipstackBackend {
                         .ok_or_else(|| Error::configuration("endpoint not initialized"))?
                 };
 
-                let downstream_listener = {
-                    let guard = context.sockets.downstream.lock().await;
-                    guard
-                        .clone()
-                        .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
-                };
-                let default_user = context.config.downstream.default_user.as_deref();
-
-                let config = context.config.as_ref();
-                let identity = if config.upstream.default_identity.is_empty() {
-                    downstream_contact
-                        .as_ref()
-                        .and_then(|uri| uri.auth.as_ref().map(|auth| auth.user.clone()))
-                        .unwrap_or_else(|| "anonymous".into())
-                } else {
-                    config.upstream.default_identity.clone()
-                };
-                let fallback_p_called_party =
-                    Self::build_default_called_party_uri(&config.upstream);
-
                 let upstream_remote_tag = original_request
                     .from_header()
                     .ok()
@@ -2640,6 +2662,7 @@ impl RsipstackBackend {
 
                 let task_upstream_local_tag = upstream_local_tag.clone();
                 let task_upstream_remote_tag = upstream_remote_tag.clone();
+                let task_upstream_local_user = identity.clone();
 
                 let downstream_contact_clone = downstream_contact.clone();
                 let call_template = CallContext {
@@ -2729,6 +2752,7 @@ impl RsipstackBackend {
                             cancel_token,
                             task_upstream_local_tag,
                             task_upstream_remote_tag,
+                            task_upstream_local_user,
                         )
                         .await;
                     backend
