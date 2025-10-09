@@ -81,6 +81,7 @@ mod tests {
                 registration_refresh_secs: 60,
                 invite_timeout_secs: 32,
             },
+            user_agent: None,
         };
 
         let proxy = FtthSipProxyBuilder::new(config)

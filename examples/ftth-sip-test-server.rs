@@ -240,6 +240,7 @@ impl Cli {
             downstream,
             media,
             timers,
+            user_agent: None,
         })
     }
 }

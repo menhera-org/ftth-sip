@@ -48,12 +48,14 @@ use super::utils::{constant_time_eq, md5_hex, strip_rport_param};
 use crate::sip::registration::DownstreamRegistration;
 use tracing::{debug, error, info, warn};
 
-#[derive(Debug, Default)]
-struct ProxyMessageInspector;
+#[derive(Debug)]
+struct ProxyMessageInspector {
+    user_agent: String,
+}
 
 impl ProxyMessageInspector {
-    fn new(_downstream_addrs: Vec<SocketAddr>) -> Self {
-        Self
+    fn new(user_agent: String) -> Self {
+        Self { user_agent }
     }
 
     fn strip_rport(via: &mut rsip::headers::Via) {
@@ -64,6 +66,19 @@ impl ProxyMessageInspector {
             *via = typed.into();
         }
     }
+
+    fn apply_user_agent(headers: &mut rsip::headers::Headers, value: &str) {
+        headers.retain(|header| {
+            !matches!(header, rsip::Header::UserAgent(_))
+                && !matches!(
+                    header,
+                    rsip::Header::Other(name, _) if name.eq_ignore_ascii_case("User-Agent")
+                )
+        });
+        headers.push(rsip::Header::UserAgent(rsip::headers::UserAgent::from(
+            value.to_string(),
+        )));
+    }
 }
 
 impl MessageInspector for ProxyMessageInspector {
@@ -73,9 +88,13 @@ impl MessageInspector for ProxyMessageInspector {
                 if let Ok(via) = req.via_header_mut() {
                     Self::strip_rport(via);
                 }
+                Self::apply_user_agent(&mut req.headers, &self.user_agent);
                 SipMessage::Request(req)
             }
-            other => other,
+            SipMessage::Response(mut res) => {
+                Self::apply_user_agent(&mut res.headers, &self.user_agent);
+                SipMessage::Response(res)
+            }
         }
     }
 
@@ -160,13 +179,13 @@ impl SipBackend for RsipstackBackend {
         }
         *context.sockets.downstream.lock().await = Some(downstream_canonical);
 
+        let user_agent = context.config.resolved_user_agent();
+
         let mut endpoint_builder = EndpointBuilder::new();
         endpoint_builder
             .with_cancel_token(cancel.clone())
             .with_transport_layer(transport_layer)
-            .with_inspector(Box::new(ProxyMessageInspector::new(vec![
-                downstream_canonical,
-            ])));
+            .with_inspector(Box::new(ProxyMessageInspector::new(user_agent)));
         let endpoint = Arc::new(endpoint_builder.build());
 
         {
@@ -306,18 +325,13 @@ impl RsipstackBackend {
         }
     }
 
-    fn identity_allowed(
-        identity: &str,
-        config: &crate::config::UpstreamConfig,
-    ) -> bool {
+    fn identity_allowed(identity: &str, config: &crate::config::UpstreamConfig) -> bool {
         config
             .allowed_identities
             .iter()
             .any(|allowed| allowed.eq_ignore_ascii_case(identity))
             || (!config.default_identity.is_empty()
-                && config
-                    .default_identity
-                    .eq_ignore_ascii_case(identity))
+                && config.default_identity.eq_ignore_ascii_case(identity))
     }
 
     fn preferred_identity_user(
@@ -351,11 +365,7 @@ impl RsipstackBackend {
                     } else if without_brackets.contains('@') {
                         format!("sip:{}", without_brackets)
                     } else {
-                        format!(
-                            "sip:{}@{}",
-                            without_brackets,
-                            upstream_config.sip_domain
-                        )
+                        format!("sip:{}@{}", without_brackets, upstream_config.sip_domain)
                     };
 
                     Uri::try_from(candidate.as_str())
@@ -605,9 +615,7 @@ impl RsipstackBackend {
                 typed_to
                     .params
                     .retain(|param| !matches!(param, Param::Tag(_)));
-                typed_to
-                    .params
-                    .push(Param::Tag(tag_value.clone()));
+                typed_to.params.push(Param::Tag(tag_value.clone()));
             }
             request
                 .headers
@@ -1257,9 +1265,7 @@ impl RsipstackBackend {
                 request
                     .headers
                     .retain(|header| !matches!(header, rsip::Header::To(_)));
-                request
-                    .headers
-                    .push(rsip::Header::To(typed_to.into()));
+                request.headers.push(rsip::Header::To(typed_to.into()));
             }
         }
 
@@ -1695,7 +1701,12 @@ impl RsipstackBackend {
         media_session: MediaSessionHandle,
         cancel_token: CancellationToken,
         context: SipContext,
-    ) -> Result<(Option<StatusCode>, Option<Response>, Option<Uri>, Option<Tag>)> {
+    ) -> Result<(
+        Option<StatusCode>,
+        Option<Response>,
+        Option<Uri>,
+        Option<Tag>,
+    )> {
         let mut final_status: Option<StatusCode> = None;
         let mut final_response: Option<Response> = None;
         let mut final_remote_contact: Option<Uri> = None;
@@ -1798,7 +1809,12 @@ impl RsipstackBackend {
             }
         }
 
-        Ok((final_status, final_response, final_remote_contact, final_remote_tag))
+        Ok((
+            final_status,
+            final_response,
+            final_remote_contact,
+            final_remote_tag,
+        ))
     }
 
     async fn forward_downstream_responses(
@@ -1949,7 +1965,12 @@ impl RsipstackBackend {
         &self,
         context: SipContext,
         call_id: String,
-        result: Result<(Option<StatusCode>, Option<Response>, Option<Uri>, Option<Tag>)>,
+        result: Result<(
+            Option<StatusCode>,
+            Option<Response>,
+            Option<Uri>,
+            Option<Tag>,
+        )>,
     ) {
         let pending_entry = context.pending.write().await.remove(&call_id);
         let Some(pending_entry) = pending_entry else {
@@ -1964,8 +1985,8 @@ impl RsipstackBackend {
                         if matches!(status.kind(), StatusCodeKind::Successful) =>
                     {
                         let upstream_contact_uri = remote_contact;
-                        let upstream_remote_tag = remote_tag
-                            .or_else(|| pending.upstream_remote_tag.clone());
+                        let upstream_remote_tag =
+                            remote_tag.or_else(|| pending.upstream_remote_tag.clone());
 
                         let upstream_contact = upstream_contact_uri
                             .unwrap_or_else(|| pending.upstream_request_uri.clone());
@@ -2040,12 +2061,8 @@ impl RsipstackBackend {
                     downstream_contact = pending.downstream_contact.clone();
                 }
 
-                let downstream_local_tag = downstream_tag
-                    .or_else(|| {
-                        pending
-                            .downstream_local_tag
-                            .clone()
-                    });
+                let downstream_local_tag =
+                    downstream_tag.or_else(|| pending.downstream_local_tag.clone());
 
                 let upstream_contact = pending
                     .upstream_request
@@ -2065,8 +2082,8 @@ impl RsipstackBackend {
                     })
                     .or_else(|| pending.upstream_remote_tag.clone());
 
-                let upstream_contact = upstream_contact
-                    .unwrap_or_else(|| pending.upstream_request_uri.clone());
+                let upstream_contact =
+                    upstream_contact.unwrap_or_else(|| pending.upstream_request_uri.clone());
 
                 context.calls.write().await.insert(
                     call_id,

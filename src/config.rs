@@ -3,6 +3,8 @@ use std::net::{IpAddr, SocketAddr};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+const DEFAULT_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone)]
 pub struct BindConfig {
@@ -113,4 +115,17 @@ pub struct ProxyConfig {
     pub downstream: DownstreamConfig,
     pub media: MediaConfig,
     pub timers: TimerConfig,
+    /// Optional User-Agent header override applied to all outbound SIP messages.
+    pub user_agent: Option<String>,
+}
+
+impl ProxyConfig {
+    pub fn resolved_user_agent(&self) -> String {
+        self.user_agent
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| DEFAULT_USER_AGENT.to_string())
+    }
 }
