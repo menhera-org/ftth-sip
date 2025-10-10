@@ -2949,9 +2949,16 @@ impl RsipstackBackend {
         };
 
         if call.is_none() {
-            let _ = self
-                .forward_pending_ack(context.clone(), tx, &call_id, direction)
+            let handled = self
+                .forward_pending_dialog_request(context.clone(), tx, &call_id, direction)
                 .await?;
+            if !handled {
+                debug!(
+                    call_id,
+                    ?direction,
+                    "handle_ack: no pending dialog to forward"
+                );
+            }
             return Ok(());
         }
 
@@ -3039,7 +3046,7 @@ impl RsipstackBackend {
         Ok(())
     }
 
-    async fn forward_pending_ack(
+    async fn forward_pending_dialog_request(
         &self,
         context: SipContext,
         tx: &mut Transaction,
@@ -3055,6 +3062,58 @@ impl RsipstackBackend {
         };
 
         match (direction, pending) {
+            (TransactionDirection::Downstream, PendingInvite::Inbound(pending)) => {
+                let endpoint = {
+                    let guard = self.inner.endpoint.read().await;
+                    guard
+                        .as_ref()
+                        .cloned()
+                        .ok_or_else(|| Error::configuration("endpoint not initialized"))?
+                };
+
+                let upstream_listener = {
+                    let guard = context.sockets.upstream.lock().await;
+                    guard
+                        .clone()
+                        .unwrap_or_else(|| context.config.upstream.bind.socket_addr())
+                };
+                let config = context.config.as_ref();
+                let route_set = { context.route_set.read().await.clone() };
+
+                let upstream_contact = pending
+                    .upstream_request
+                    .contact_header()
+                    .ok()
+                    .and_then(|header| header.typed().ok().map(|typed| typed.uri));
+                let target_contact = upstream_contact
+                    .as_ref()
+                    .or_else(|| Some(&pending.upstream_request_uri));
+
+                let upstream_request = Self::prepare_upstream_request(
+                    endpoint.as_ref(),
+                    upstream_listener,
+                    &config.upstream,
+                    &tx.original,
+                    None,
+                    &pending.identity,
+                    &route_set,
+                    None,
+                    &pending.upstream_local_tag,
+                    pending.upstream_remote_tag.as_ref(),
+                    target_contact,
+                )?;
+
+                let _ = self
+                    .start_client_transaction(
+                        endpoint,
+                        upstream_request,
+                        Self::build_trunk_target(&context.config.upstream),
+                        ClientTarget::Upstream,
+                    )
+                    .await?;
+
+                Ok(true)
+            }
             (TransactionDirection::Upstream, PendingInvite::Inbound(pending)) => {
                 let endpoint = {
                     let guard = self.inner.endpoint.read().await;
@@ -3090,6 +3149,67 @@ impl RsipstackBackend {
                     media_key: pending.media_key,
                     upstream_target: Self::build_trunk_target(&context.config.upstream),
                     upstream_contact,
+                    downstream_contact: pending.downstream_contact.clone(),
+                    upstream_local_tag: pending.upstream_local_tag.clone(),
+                    upstream_remote_tag: pending.upstream_remote_tag.clone(),
+                    downstream_target: downstream_target.clone(),
+                    downstream_local_tag: pending.downstream_local_tag.clone(),
+                    upstream_request_uri: pending.upstream_request_uri.clone(),
+                    identity: pending.identity.clone(),
+                };
+
+                let downstream_request = Self::prepare_downstream_request(
+                    endpoint.as_ref(),
+                    downstream_listener,
+                    &stub_call,
+                    &tx.original,
+                    None,
+                    false,
+                    default_user,
+                    fallback_p_called_party,
+                )?;
+
+                let _ = self
+                    .start_client_transaction(
+                        endpoint,
+                        downstream_request,
+                        downstream_target,
+                        ClientTarget::Downstream,
+                    )
+                    .await?;
+
+                Ok(true)
+            }
+            (TransactionDirection::Upstream, PendingInvite::Outbound(pending)) => {
+                let endpoint = {
+                    let guard = self.inner.endpoint.read().await;
+                    guard
+                        .as_ref()
+                        .cloned()
+                        .ok_or_else(|| Error::configuration("endpoint not initialized"))?
+                };
+
+                let downstream_listener = {
+                    let guard = context.sockets.downstream.lock().await;
+                    guard
+                        .clone()
+                        .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
+                };
+                let default_user = context.config.downstream.default_user.as_deref();
+                let fallback_p_called_party =
+                    Self::build_default_called_party_uri(&context.config.upstream);
+
+                let downstream_target = pending
+                    .downstream_contact
+                    .as_ref()
+                    .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
+                    .unwrap_or_else(|| pending.downstream_target.clone());
+
+                let stub_call = CallContext {
+                    media: pending.media.clone(),
+                    media_key: pending.media_key,
+                    upstream_target: pending.upstream_target.clone(),
+                    upstream_contact: Some(pending.upstream_request_uri.clone()),
                     downstream_contact: pending.downstream_contact.clone(),
                     upstream_local_tag: pending.upstream_local_tag.clone(),
                     upstream_remote_tag: pending.upstream_remote_tag.clone(),
@@ -3175,7 +3295,6 @@ impl RsipstackBackend {
 
                 Ok(true)
             }
-            _ => Ok(false),
         }
     }
 
@@ -3195,6 +3314,12 @@ impl RsipstackBackend {
         let call = match context.calls.read().await.get(&call_id).cloned() {
             Some(call) => call,
             None => {
+                if self
+                    .forward_pending_dialog_request(context.clone(), tx, &call_id, direction)
+                    .await?
+                {
+                    return Ok(());
+                }
                 tx.reply(StatusCode::CallTransactionDoesNotExist)
                     .await
                     .map_err(Error::sip_stack)?;
@@ -3222,6 +3347,12 @@ impl RsipstackBackend {
         let call = match context.calls.read().await.get(&call_id).cloned() {
             Some(call) => call,
             None => {
+                if self
+                    .forward_pending_dialog_request(context.clone(), tx, &call_id, direction)
+                    .await?
+                {
+                    return Ok(());
+                }
                 tx.reply(StatusCode::CallTransactionDoesNotExist)
                     .await
                     .map_err(Error::sip_stack)?;
@@ -3249,6 +3380,12 @@ impl RsipstackBackend {
         let call = match context.calls.read().await.get(&call_id).cloned() {
             Some(call) => call,
             None => {
+                if self
+                    .forward_pending_dialog_request(context.clone(), tx, &call_id, direction)
+                    .await?
+                {
+                    return Ok(());
+                }
                 tx.reply(StatusCode::CallTransactionDoesNotExist)
                     .await
                     .map_err(Error::sip_stack)?;
