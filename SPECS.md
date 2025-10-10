@@ -35,9 +35,12 @@ The user of this library configures the following (non exhaustive):
 - Our proxy also needs to REGISTER ourselves to the upstream SIP server.
 - Request URI of the REGISTER request must be `sip:<trunk domain>`.
 - rport parameter is not permitted.
-- `Contact` header contains: `<sip:(random string)@(trunk interface address)>`.
+- `Contact` header contains: `<sip:(random string)@(trunk interface address)>`. That random string is used throughout the lifetime of our proxy. (Re-launch of the proxy may change the value). `transport` parameters are forbidden inside this header.
 - Registration expiration must be set to 3600 seconds. Re-REGISTERs happen after the seconds calculated by: `0.4 * <Expires header value on previous 200 OK to REGISTER>`.
 - There should be no authentication requirements by the trunk. We don't authenticate our proxy against the trunk.
+- `Via` header must contain: `SIP/2.0/UDP (trunk interface address):5060;branch=z9hG4bK(...)`, and must not contain `transport` parameters. Branch value must differ in re-REGISTERs every time.
+- `From` header to the trunk must contain: `<sip:(main number)@(trunk domain)>;tag=(...)`. Tag must differ per (re-)registrations.
+- `To` header to the trunk must contain: `<sip:(main number)@(trunk domain)>`.
 
 ## Incoming calls from the trunk
 - Remember the `From:` header URIs on incoming calls, and use them as the `To:` headers sent to the trunk on that call.
@@ -47,6 +50,7 @@ The user of this library configures the following (non exhaustive):
 - Extract the isub parameters of the SIP URI of the called party. That parameter is passed down to the client as-is.
 - Extract the userinfo part of the SIP URI of the called party, and match that to **ALLOWED_IDENTITIES**. If no match was found, we respond with permanent error codes such as 404s. isub and other parameters are ignored when performing this matching.
 - Call the downstream client with the called party number in the userinfo part of SIP URIs.
+- We forward `P-Asserted-Identity` headers as-is from the trunk to the client.
 
 ## Outgoing calls from the client
 - Make the SIP URI in the `P-Preferred-Identity` header the authoritative source of the caller ID the client wants to use, with reasonable fallbacks to other headers.
@@ -77,3 +81,4 @@ The user of this library configures the following (non exhaustive):
 - In SDP, `a=sendrecv` must be set.
 - In SDP, `a=ptime:20` is expected per NTT specs.
 - Almost certainly, symmetric RTP is not permitted.
+- We use `RTP/AVP`.
