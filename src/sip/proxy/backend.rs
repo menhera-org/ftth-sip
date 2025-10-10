@@ -761,14 +761,16 @@ impl RsipstackBackend {
         strip_rport_param(&mut via);
         request.headers.unique_push(rsip::Header::Via(via.into()));
 
-        let identity_uri_string = format!("sip:{}@{}", identity_user, upstream_config.sip_domain);
-        let mut identity_uri =
-            Uri::try_from(identity_uri_string.as_str()).map_err(Error::sip_stack)?;
-        if let Some(isub) = identity_isub {
-            Self::set_isub_param(&mut identity_uri, isub);
+        let identity_uri_string = if let Some(isub) = identity_isub {
+            format!(
+                "sip:{};isub={}@{}",
+                identity_user, isub, upstream_config.sip_domain
+            )
         } else {
-            Self::clear_isub_param(&mut identity_uri);
-        }
+            format!("sip:{}@{}", identity_user, upstream_config.sip_domain)
+        };
+        let identity_uri =
+            Uri::try_from(identity_uri_string.as_str()).map_err(Error::sip_stack)?;
 
         let mut typed_to = original
             .to_header()
@@ -872,20 +874,17 @@ impl RsipstackBackend {
                     isub: identity_isub.map(|value| value.to_string()),
                 });
 
-            let mut preferred_uri = Uri::try_from(
+            let p_preferred = if let Some(isub) = preferred_identity.isub.as_deref() {
                 format!(
-                    "sip:{}@{}",
+                    "<sip:{};isub={}@{}>",
+                    preferred_identity.user, isub, upstream_config.sip_domain
+                )
+            } else {
+                format!(
+                    "<sip:{}@{}>",
                     preferred_identity.user, upstream_config.sip_domain
                 )
-                .as_str(),
-            )
-            .map_err(Error::sip_stack)?;
-            if let Some(isub) = preferred_identity.isub.as_deref() {
-                Self::set_isub_param(&mut preferred_uri, isub);
-            } else {
-                Self::clear_isub_param(&mut preferred_uri);
-            }
-            let p_preferred = format!("<{}>", preferred_uri);
+            };
 
             request.headers.retain(|header| {
                 !matches!(header, rsip::Header::Other(name, _) if name.eq_ignore_ascii_case("P-Preferred-Identity"))
