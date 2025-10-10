@@ -2,6 +2,8 @@
 
 This is a SIP and media (PCMU only) proxy between an NTT Hikari Denwa (NGN) trunk, and a single downstream client. This crate needs only to support Linux-based OSes. This crate has many NTT specifics, explained below.
 
+**Note**: This specification specifies the expected behaviors of our proxy implementation, and does not directly describe the contents of the official NTT specs, which is not published.
+
 ## Configuration
 Programs that use this lib crate fetch NGN configuration info using DHCPv4/DHCPv6. That is covered in [ftth-dhcp](https://github.com/menhera-org/ftth-dhcp).
 
