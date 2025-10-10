@@ -83,6 +83,7 @@ impl UpstreamRegistrar {
                     match result {
                         Ok(next_refresh) => {
                             backoff = Duration::from_secs(1);
+                            let sleep_duration = next_refresh;
                             tokio::select! {
                                 _ = self.shutdown.cancelled() => {
                                     info!("upstream registrar shutdown requested");
@@ -92,7 +93,9 @@ impl UpstreamRegistrar {
                                     debug!("upstream registrar refresh triggered early");
                                     continue;
                                 }
-                                _ = tokio::time::sleep(next_refresh) => {}
+                                _ = tokio::time::sleep(sleep_duration) => {
+                                    info!(seconds = sleep_duration.as_secs(), "upstream registration refresh timer fired");
+                                }
                             }
                         }
                         Err(err) => {
@@ -149,6 +152,12 @@ impl UpstreamRegistrar {
                             self.update_associated_identities(&response).await;
                             let refresh = self.schedule_from_response(&response, expires_hint)?;
                             self.nonce_count.store(0, Ordering::SeqCst);
+                            let contact_addr = self.context.config.upstream.bind.socket_addr();
+                            info!(
+                                expires_secs = refresh.as_secs(),
+                                contact = %contact_addr,
+                                "upstream registration succeeded"
+                            );
                             return Ok(refresh);
                         }
                         StatusCode::Unauthorized | StatusCode::ProxyAuthenticationRequired => {
@@ -205,6 +214,7 @@ impl UpstreamRegistrar {
                             return Ok(Duration::from_secs(retry_after.max(1)));
                         }
                         other => {
+                            warn!(status = %other, "upstream registration failed");
                             return Err(Error::sip_stack(format!(
                                 "unexpected REGISTER response status {other}"
                             )));
@@ -215,6 +225,7 @@ impl UpstreamRegistrar {
 
             if !needs_auth_retry {
                 // No response received; propagate error so caller can back off
+                warn!("no valid upstream registration response");
                 return Err(Error::sip_stack("no valid response to REGISTER"));
             }
         }
