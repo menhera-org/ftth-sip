@@ -52,6 +52,7 @@ pub struct CallContext {
     pub upstream_remote_uri: rsip::Uri,
     pub upstream_local_uri: rsip::Uri,
     pub identity: String,
+    pub identity_isub: Option<String>,
 }
 
 #[derive(Clone)]
@@ -115,6 +116,7 @@ pub(super) struct OutboundPendingInvite {
     pub(super) upstream_request: rsip::Request,
     pub(super) downstream_target: SipAddr,
     pub(super) identity: String,
+    pub(super) identity_isub: Option<String>,
     pub(super) upstream_local_tag: Tag,
     pub(super) upstream_remote_tag: Option<Tag>,
     pub(super) upstream_request_uri: rsip::Uri,
@@ -135,6 +137,7 @@ pub(super) struct InboundPendingInvite {
     pub(super) endpoint: Arc<Endpoint>,
     pub(super) downstream_request: rsip::Request,
     pub(super) identity: String,
+    pub(super) identity_isub: Option<String>,
     pub(super) upstream_request: rsip::Request,
     pub(super) upstream_local_tag: Tag,
     pub(super) upstream_remote_tag: Option<Tag>,
