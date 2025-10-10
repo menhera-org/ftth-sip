@@ -2701,7 +2701,10 @@ impl RsipstackBackend {
 
                 let target = Self::build_trunk_target(&config.upstream);
                 let upstream_request_clone = upstream_request.clone();
-                let upstream_dialog_uri = upstream_request_clone.uri.clone();
+                let upstream_dialog_uri = upstream_request_clone.from_header().cloned().ok()
+                    .map(|h| h.uri().ok()).flatten()
+                    .unwrap_or(upstream_request_clone.uri.clone());
+                //let upstream_dialog_uri = upstream_request_clone.uri.clone();
                 let upstream_request_uri = upstream_request_clone.uri.clone();
                 let client_tx = match self
                     .start_client_transaction(
