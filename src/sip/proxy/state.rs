@@ -48,7 +48,8 @@ pub struct CallContext {
     pub downstream_target: SipAddr,
     pub downstream_local_tag: Option<Tag>,
     pub upstream_request_uri: rsip::Uri,
-    pub upstream_dialog_uri: rsip::Uri,
+    pub upstream_remote_uri: rsip::Uri,
+    pub upstream_local_uri: rsip::Uri,
     pub identity: String,
 }
 

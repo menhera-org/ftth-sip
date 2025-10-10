@@ -664,9 +664,8 @@ impl RsipstackBackend {
         } else {
             upstream_config.bind.port
         };
-        let contact_uri =
-            Uri::try_from(format!("sip:{}:{}", contact_ip, contact_port).as_str())
-                .map_err(Error::sip_stack)?;
+        let contact_uri = Uri::try_from(format!("sip:{}:{}", contact_ip, contact_port).as_str())
+            .map_err(Error::sip_stack)?;
 
         let contact_header = Contact::from(format!("<{}>", contact_uri));
         request
@@ -1551,7 +1550,7 @@ impl RsipstackBackend {
                     &call.upstream_local_tag,
                     call.upstream_remote_tag.as_ref(),
                     target_contact.as_ref(),
-                    Some(&call.upstream_dialog_uri),
+                    Some(&call.upstream_remote_uri),
                 )?;
 
                 let mut client_tx = self
@@ -1631,9 +1630,15 @@ impl RsipstackBackend {
                 if let Some(tag) = Self::extract_upstream_from_tag(&tx.original) {
                     call.upstream_remote_tag = Some(tag);
                 }
-                let dialog_uri_cand = tx.original.from_header().cloned().ok().map(|h| h.uri().ok()).flatten();
+                let dialog_uri_cand = tx
+                    .original
+                    .from_header()
+                    .cloned()
+                    .ok()
+                    .map(|h| h.uri().ok())
+                    .flatten();
                 if let Some(uri) = dialog_uri_cand {
-                    call.upstream_dialog_uri = uri;
+                    call.upstream_remote_uri = uri;
                 }
                 if let Some(contact) = tx
                     .original
@@ -2136,7 +2141,8 @@ impl RsipstackBackend {
                                 downstream_target: pending.downstream_target,
                                 downstream_local_tag: pending.downstream_local_tag.clone(),
                                 upstream_request_uri: upstream_contact,
-                                upstream_dialog_uri: pending.upstream_dialog_uri.clone(),
+                                upstream_remote_uri: pending.upstream_dialog_uri.clone(),
+                                upstream_local_uri: pending.upstream_request_uri.clone(),
                                 identity: pending.identity,
                             },
                         );
@@ -2229,7 +2235,8 @@ impl RsipstackBackend {
                         downstream_target,
                         downstream_local_tag,
                         upstream_request_uri: upstream_contact,
-                        upstream_dialog_uri: pending.upstream_dialog_uri.clone(),
+                        upstream_remote_uri: pending.upstream_dialog_uri.clone(),
+                        upstream_local_uri: pending.upstream_request_uri.clone(),
                         identity: pending.identity,
                     },
                 );
@@ -2701,10 +2708,11 @@ impl RsipstackBackend {
 
                 let target = Self::build_trunk_target(&config.upstream);
                 let upstream_request_clone = upstream_request.clone();
-                let upstream_dialog_uri = upstream_request_clone.from_header().cloned().ok()
-                    .map(|h| h.uri().ok()).flatten()
-                    .unwrap_or(upstream_request_clone.uri.clone());
-                //let upstream_dialog_uri = upstream_request_clone.uri.clone();
+                // let upstream_dialog_uri = upstream_request_clone.from_header().cloned().ok()
+                //     .map(|h| h.uri().ok()).flatten()
+                //     .unwrap_or(upstream_request_clone.uri.clone());
+                // debug!("Upstream dialog URI: {}", upstream_dialog_uri);
+                let upstream_dialog_uri = upstream_request_clone.uri.clone();
                 let upstream_request_uri = upstream_request_clone.uri.clone();
                 let client_tx = match self
                     .start_client_transaction(
@@ -2892,7 +2900,13 @@ impl RsipstackBackend {
                 let upstream_request_uri = upstream_contact_uri
                     .clone()
                     .unwrap_or_else(|| original_request.uri.clone());
-                let original_dialog_uri = original_request.from_header().ok().cloned().map(|h| h.uri().ok()).flatten().unwrap_or(original_request.uri.clone());
+                let original_remote_uri = original_request
+                    .from_header()
+                    .ok()
+                    .cloned()
+                    .map(|h| h.uri().ok())
+                    .flatten()
+                    .unwrap_or(original_request.uri.clone());
 
                 let media_session = context.media.allocate(media_key.clone()).await?;
 
@@ -2925,6 +2939,10 @@ impl RsipstackBackend {
                 let task_upstream_remote_tag = upstream_remote_tag.clone();
                 let task_upstream_local_user = to_user.unwrap_or_else(|| identity.clone());
 
+                let to_uri = to_header
+                    .clone()
+                    .map(|h| h.uri)
+                    .unwrap_or(upstream_request_uri.clone());
                 let downstream_contact_clone = downstream_contact.clone();
                 let call_template = CallContext {
                     media: media_session.clone(),
@@ -2937,7 +2955,8 @@ impl RsipstackBackend {
                     downstream_target: downstream_target.clone(),
                     downstream_local_tag: None,
                     upstream_request_uri: upstream_request_uri.clone(),
-                    upstream_dialog_uri: original_dialog_uri.clone(),
+                    upstream_remote_uri: original_remote_uri.clone(),
+                    upstream_local_uri: to_uri.clone(),
                     identity: identity.clone(),
                 };
 
@@ -2997,7 +3016,7 @@ impl RsipstackBackend {
                         upstream_local_tag: upstream_local_tag.clone(),
                         upstream_remote_tag: upstream_remote_tag.clone(),
                         upstream_request_uri: upstream_request_uri.clone(),
-                        upstream_dialog_uri: original_dialog_uri,
+                        upstream_dialog_uri: original_remote_uri,
                     }),
                 );
 
@@ -3102,7 +3121,7 @@ impl RsipstackBackend {
                     &call.upstream_local_tag,
                     call.upstream_remote_tag.as_ref(),
                     target_contact,
-                    Some(&call.upstream_dialog_uri),
+                    Some(&call.upstream_remote_uri),
                 )?;
 
                 let _ = self
@@ -3263,7 +3282,8 @@ impl RsipstackBackend {
                     downstream_target: downstream_target.clone(),
                     downstream_local_tag: pending.downstream_local_tag.clone(),
                     upstream_request_uri: pending.upstream_request_uri.clone(),
-                    upstream_dialog_uri: pending.upstream_dialog_uri.clone(),
+                    upstream_remote_uri: pending.upstream_dialog_uri.clone(),
+                    upstream_local_uri: pending.upstream_request_uri.clone(),
                     identity: pending.identity.clone(),
                 };
 
@@ -3328,7 +3348,8 @@ impl RsipstackBackend {
                     downstream_target: downstream_target.clone(),
                     downstream_local_tag: pending.downstream_local_tag.clone(),
                     upstream_request_uri: pending.upstream_request_uri.clone(),
-                    upstream_dialog_uri: pending.upstream_dialog_uri.clone(),
+                    upstream_remote_uri: pending.upstream_dialog_uri.clone(),
+                    upstream_local_uri: pending.upstream_request_uri.clone(),
                     identity: pending.identity.clone(),
                 };
 
@@ -3575,7 +3596,7 @@ impl RsipstackBackend {
                     &call.upstream_local_tag,
                     call.upstream_remote_tag.as_ref(),
                     target_contact.as_ref(),
-                    Some(&call.upstream_dialog_uri),
+                    Some(&call.upstream_remote_uri),
                 )?;
 
                 let mut client_tx = self
