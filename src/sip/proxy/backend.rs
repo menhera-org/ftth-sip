@@ -1523,6 +1523,25 @@ impl RsipstackBackend {
                     .upstream_contact
                     .as_ref()
                     .or_else(|| Some(&call.upstream_request_uri));
+                let upstream_contact_with_user = target_contact.map(|uri| {
+                    if uri
+                        .auth
+                        .as_ref()
+                        .map(|auth| auth.user.trim().is_empty())
+                        .unwrap_or(true)
+                    {
+                        let mut cloned = uri.clone();
+                        cloned.auth = call
+                            .upstream_contact
+                            .as_ref()
+                            .and_then(|stored| stored.auth.clone())
+                            .or_else(|| call.upstream_request_uri.auth.clone())
+                            .or_else(|| uri.auth.clone());
+                        cloned
+                    } else {
+                        uri.clone()
+                    }
+                });
 
                 let upstream_request = Self::prepare_upstream_request(
                     &endpoint,
@@ -1535,7 +1554,7 @@ impl RsipstackBackend {
                     invite_isub.as_ref(),
                     &call.upstream_local_tag,
                     call.upstream_remote_tag.as_ref(),
-                    target_contact,
+                    upstream_contact_with_user.as_ref(),
                 )?;
 
                 let mut client_tx = self
