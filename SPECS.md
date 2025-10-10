@@ -3,13 +3,13 @@
 This is a SIP and media (PCMU only) proxy between an NTT Hikari Denwa (NGN) trunk, and a single downstream client. This crate needs only to support Linux-based OSes. This crate has many NTT specifics, explained below.
 
 ## Configuration
-Programs that use this lib crate fetches NGN configuration info using DHCPv4/DHCPv6. That is covered in [ftth-dhcp](https://github.com/menhera-org/ftth-dhcp).
+Programs that use this lib crate fetch NGN configuration info using DHCPv4/DHCPv6. That is covered in [ftth-dhcp](https://github.com/menhera-org/ftth-dhcp).
 
 The user of this library configures the following (non exhaustive):
 
 - The main number assigned by NTT
 - Any additional numbers assigned by NTT (through DHCP, up to only four additional numbers are notified us; when there are more than 4 additional numbers, no such additional numbers are told us through DHCP).
-    - Any numbers, that is sent to us in `200 OK`s to our REGISTERs toward the trunk, in `P-Associated-URI` header (we extract the userinfo part of the SIP URIs), must be stored separately, and they are treated as additional numbers assigned by NTT.
+    - Any numbers that are sent to us in `200 OK`s to our REGISTERs toward the trunk, in `P-Associated-URI` header (we extract the userinfo part of the SIP URIs), must be stored separately, and they are treated as additional numbers assigned by NTT.
 - The trunk-leg network interface to bind to.
 - The trunk-leg network address (that is assigned to us through DHCP). (port is UDP 5060)
 - The trunk-side domain (that does not even need to resolve) to use in the trunk-leg URIs. e.g. `ntt-central.ne.jp` (this example is a false domain).
@@ -35,7 +35,7 @@ The user of this library configures the following (non exhaustive):
 - rport parameter is not permitted.
 - `Contact` header contains: `<sip:(random string)@(trunk interface address)>`.
 - Registration expiration must be set to 3600 seconds. Re-REGISTERs happen after the seconds calculated by: `0.4 * <Expires header value on previous 200 OK to REGISTER>`.
-- There should be no authentication requirements by the trunk. We don't do authenticate our proxy against the trunk.
+- There should be no authentication requirements by the trunk. We don't authenticate our proxy against the trunk.
 
 ## Incoming calls from the trunk
 - Remember the `From:` header URIs on incoming calls, and use them as the `To:` headers sent to the trunk on that call.
@@ -43,7 +43,7 @@ The user of this library configures the following (non exhaustive):
 - When no downstream client is registered, respond with appropriate temporary errors.
 - Make the P-Called-Party-ID headers the authoritative sources of the called party numbers, with a fall-back to To headers.
 - Extract the isub parameters of the SIP URI of the called party. That parameter is passed down to the client as-is.
-- Extract the userinfo part of the SIP URI of the called party, and match that to **ALLOWED_IDENTITIES**. If no match were found, we respond with permanent error codes such as 404s. isub and other parameters are ignored when performing this matching.
+- Extract the userinfo part of the SIP URI of the called party, and match that to **ALLOWED_IDENTITIES**. If no match was found, we respond with permanent error codes such as 404s. isub and other parameters are ignored when performing this matching.
 - Call the downstream client with the called party number in the userinfo part of SIP URIs.
 
 ## Outgoing calls from the client
@@ -61,7 +61,7 @@ The user of this library configures the following (non exhaustive):
 - `To:` headers of the INVITEs sent to the trunk mirror the Request URIs of those requests.
 - Remember the tag in `From` header in responses from the trunk. And use that value as `To` headers' tag values we send during that call.
 - `From` value we use for outgoing requests are remembered alongside the tags, and use that for messages we send to the trunk during that call.
-- No `rport` parameters are allowed inside `Via` headers. AVia headers need to contain: `SIP/2.0/UDP (the trunk interface IP):5060;branch=z9hG4bK(...)`.
+- No `rport` parameters are allowed inside `Via` headers. Via headers need to contain: `SIP/2.0/UDP (the trunk interface IP):5060;branch=z9hG4bK(...)`.
 - `Route` header must have the values computed by combining:
     - `Path` header values in `200 OK` trunk responses to REGISTERs we send.
     - `Service-Route` values in `200 OK` trunk responses to REGISTERs we send.
@@ -74,3 +74,4 @@ The user of this library configures the following (non exhaustive):
 - In SDP, `m=audio` line is required and PCMU is mandatory.
 - In SDP, `a=sendrecv` must be set.
 - In SDP, `a=ptime:20` is expected per NTT specs.
+- Almost certainly, symmetric RTP is not permitted.
