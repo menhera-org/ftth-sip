@@ -2140,18 +2140,16 @@ impl RsipstackBackend {
             Ok((Some(status), Some(response), downstream_tag))
                 if matches!(status.kind(), StatusCodeKind::Successful) =>
             {
-                let mut downstream_contact = response
+                let downstream_contact = response
                     .contact_header()
                     .ok()
-                    .and_then(|header| header.typed().ok().map(|typed| typed.uri));
+                    .and_then(|header| header.typed().ok().map(|typed| typed.uri))
+                    .or_else(|| pending.downstream_contact.clone())
+                    .or_else(|| Some(pending.downstream_request.uri.clone()));
                 let downstream_target = downstream_contact
                     .as_ref()
                     .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
                     .unwrap_or_else(|| pending.downstream_target.clone());
-
-                if downstream_contact.is_none() {
-                    downstream_contact = pending.downstream_contact.clone();
-                }
 
                 let downstream_local_tag =
                     downstream_tag.or_else(|| pending.downstream_local_tag.clone());
@@ -3160,8 +3158,12 @@ impl RsipstackBackend {
                 let fallback_p_called_party =
                     Self::build_default_called_party_uri(&context.config.upstream);
 
-                let downstream_target = pending
+                let downstream_request_uri = pending.downstream_request.uri.clone();
+                let downstream_contact = pending
                     .downstream_contact
+                    .clone()
+                    .or_else(|| Some(downstream_request_uri.clone()));
+                let downstream_target = downstream_contact
                     .as_ref()
                     .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
                     .unwrap_or_else(|| pending.downstream_target.clone());
@@ -3176,7 +3178,7 @@ impl RsipstackBackend {
                     media_key: pending.media_key,
                     upstream_target: Self::build_trunk_target(&context.config.upstream),
                     upstream_contact,
-                    downstream_contact: pending.downstream_contact.clone(),
+                    downstream_contact: downstream_contact.clone(),
                     upstream_local_tag: pending.upstream_local_tag.clone(),
                     upstream_remote_tag: pending.upstream_remote_tag.clone(),
                     downstream_target: downstream_target.clone(),
