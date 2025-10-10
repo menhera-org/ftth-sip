@@ -3159,11 +3159,10 @@ impl RsipstackBackend {
                 let fallback_p_called_party =
                     Self::build_default_called_party_uri(&context.config.upstream);
 
-                let downstream_request_uri = pending.downstream_request.uri.clone();
                 let downstream_contact = pending
                     .downstream_contact
                     .clone()
-                    .or_else(|| Some(downstream_request_uri.clone()));
+                    .or_else(|| Some(pending.upstream_request.uri.clone()));
                 let downstream_target = downstream_contact
                     .as_ref()
                     .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
@@ -3229,8 +3228,11 @@ impl RsipstackBackend {
                 let fallback_p_called_party =
                     Self::build_default_called_party_uri(&context.config.upstream);
 
-                let downstream_target = pending
+                let downstream_contact = pending
                     .downstream_contact
+                    .clone()
+                    .or_else(|| Some(pending.upstream_request.uri.clone()));
+                let downstream_target = downstream_contact
                     .as_ref()
                     .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
                     .unwrap_or_else(|| pending.downstream_target.clone());
@@ -3240,7 +3242,7 @@ impl RsipstackBackend {
                     media_key: pending.media_key,
                     upstream_target: pending.upstream_target.clone(),
                     upstream_contact: Some(pending.upstream_request_uri.clone()),
-                    downstream_contact: pending.downstream_contact.clone(),
+                    downstream_contact,
                     upstream_local_tag: pending.upstream_local_tag.clone(),
                     upstream_remote_tag: pending.upstream_remote_tag.clone(),
                     downstream_target: downstream_target.clone(),
