@@ -625,24 +625,17 @@ impl RsipstackBackend {
                 .unique_push(rsip::Header::To(typed_to.into()));
         }
 
-        let mut request_uri = target_contact
-            .cloned()
-            .unwrap_or_else(|| request.uri.clone());
-        let using_contact = target_contact.is_some();
-        if !using_contact {
+        let mut request_uri = if let Some(contact) = target_contact {
+            contact.clone()
+        } else {
+            let mut uri = request.uri.clone();
             if let Some(dialog_uri) = dialog_uri {
-                request_uri.auth = dialog_uri.auth.clone();
-                request_uri.params = dialog_uri.params.clone();
+                uri.auth = dialog_uri.auth.clone();
+                uri.params = dialog_uri.params.clone();
             }
-            request_uri.host_with_port = host_with_port.clone();
-        } else if let Some(dialog_uri) = dialog_uri {
-            if request_uri.auth.is_none() {
-                request_uri.auth = dialog_uri.auth.clone();
-            }
-            if request_uri.params.is_empty() {
-                request_uri.params = dialog_uri.params.clone();
-            }
-        }
+            uri.host_with_port = host_with_port.clone();
+            uri
+        };
         if let Some(rewrite) = invite_isub {
             Self::rewrite_uri_with_isub(&mut request_uri, rewrite);
         }
