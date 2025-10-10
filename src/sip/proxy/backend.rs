@@ -617,15 +617,25 @@ impl RsipstackBackend {
                 .unique_push(rsip::Header::To(typed_to.into()));
         }
 
+        let mut request_uri = request.uri.clone();
         if let Some(contact) = target_contact {
             let mut uri = contact.clone();
+            if uri
+                .auth
+                .as_ref()
+                .map(|auth| auth.user.trim().is_empty())
+                .unwrap_or(true)
+            {
+                uri.auth = request_uri.auth.clone();
+            }
             if let Some(rewrite) = invite_isub {
                 Self::rewrite_uri_with_isub(&mut uri, rewrite);
             }
-            request.uri = uri;
+            request_uri = uri;
         } else if let Some(rewrite) = invite_isub {
-            Self::rewrite_uri_with_isub(&mut request.uri, rewrite);
+            Self::rewrite_uri_with_isub(&mut request_uri, rewrite);
         }
+        request.uri = request_uri;
 
         let contact_ip = if upstream_config.bind.address.is_unspecified() {
             via_ip
