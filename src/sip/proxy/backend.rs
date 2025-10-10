@@ -1823,7 +1823,7 @@ impl RsipstackBackend {
                     call.identity.as_str(),
                     call.identity_isub.as_deref(),
                     &route_set,
-                    &*allowed_guard,
+                    &allowed_guard,
                     invite_isub.as_ref(),
                     &call.upstream_local_tag,
                     call.upstream_remote_tag.as_ref(),
@@ -2966,7 +2966,7 @@ impl RsipstackBackend {
                 let selected_identity = match Self::select_identity(
                     &tx.original,
                     &context.config.upstream,
-                    &*allowed_guard,
+                    &allowed_guard,
                 ) {
                     Some(identity) => identity,
                     None => {
@@ -3102,7 +3102,7 @@ impl RsipstackBackend {
                     identity_user.as_str(),
                     identity_isub.as_deref(),
                     &route_set,
-                    &*allowed_guard,
+                    &allowed_guard,
                     invite_isub.as_ref(),
                     &upstream_local_tag,
                     None,
@@ -3268,14 +3268,14 @@ impl RsipstackBackend {
                 let mut selected_identity = None;
 
                 if let Some(identity) = request_identity
-                    && Self::identity_allowed(&identity.user, &*allowed_guard)
+                    && Self::identity_allowed(&identity.user, &allowed_guard)
                 {
                     selected_identity = Some(identity);
                 }
 
                 if selected_identity.is_none()
                     && let Some(identity) = to_identity
-                    && Self::identity_allowed(&identity.user, &*allowed_guard)
+                    && Self::identity_allowed(&identity.user, &allowed_guard)
                 {
                     selected_identity = Some(identity);
                 }
@@ -3284,7 +3284,7 @@ impl RsipstackBackend {
                     && !config.upstream.default_identity.is_empty()
                     && let Some(identity) =
                         Self::normalize_identity_user(&config.upstream.default_identity)
-                    && (Self::identity_allowed(&identity.user, &*allowed_guard)
+                    && (Self::identity_allowed(&identity.user, &allowed_guard)
                         || allowed_guard.is_empty())
                 {
                     selected_identity = Some(identity);
@@ -3563,7 +3563,7 @@ impl RsipstackBackend {
                     call.identity.as_str(),
                     call.identity_isub.as_deref(),
                     &route_set,
-                    &*allowed_guard,
+                    &allowed_guard,
                     None,
                     &call.upstream_local_tag,
                     call.upstream_remote_tag.as_ref(),
@@ -3667,7 +3667,7 @@ impl RsipstackBackend {
                     pending.identity.as_str(),
                     pending.identity_isub.as_deref(),
                     &route_set,
-                    &*allowed_guard,
+                    &allowed_guard,
                     None,
                     &pending.upstream_local_tag,
                     pending.upstream_remote_tag.as_ref(),
@@ -3860,7 +3860,7 @@ impl RsipstackBackend {
                     pending.identity.as_str(),
                     pending.identity_isub.as_deref(),
                     &route_set,
-                    &*allowed_guard,
+                    &allowed_guard,
                     None,
                     &pending.upstream_local_tag,
                     pending.upstream_remote_tag.as_ref(),
@@ -4043,7 +4043,7 @@ impl RsipstackBackend {
                     call.identity.as_str(),
                     call.identity_isub.as_deref(),
                     &route_set,
-                    &*allowed_guard,
+                    &allowed_guard,
                     None,
                     &call.upstream_local_tag,
                     call.upstream_remote_tag.as_ref(),
