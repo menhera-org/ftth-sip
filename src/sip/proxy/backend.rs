@@ -1853,22 +1853,6 @@ impl RsipstackBackend {
                                         .ok()
                                         .and_then(|header| header.tag().ok().flatten())
                                 });
-                            if raw_contact.is_some() || raw_remote_tag.is_some() {
-                                let contact_for_pending = raw_contact.clone();
-                                let remote_tag_for_pending = raw_remote_tag.clone();
-                                let mut pending_guard = context.pending.write().await;
-                                if let Some(PendingInvite::Outbound(pending)) =
-                                    pending_guard.get_mut(&call_id)
-                                {
-                                    if let Some(contact) = contact_for_pending {
-                                        pending.upstream_request_uri = contact;
-                                    }
-                                    if let Some(tag) = remote_tag_for_pending {
-                                        pending.upstream_remote_tag = Some(tag);
-                                    }
-                                }
-                            }
-
                             Self::expand_compact_headers(&mut upstream_response.headers);
                             upstream_response.headers.retain(|header| {
                                 !matches!(
@@ -1876,6 +1860,26 @@ impl RsipstackBackend {
                                     rsip::Header::Route(_) | rsip::Header::RecordRoute(_)
                                 )
                             });
+                            let status_kind = upstream_response.status_code.kind();
+                            if raw_remote_tag.is_some()
+                                || (matches!(status_kind, StatusCodeKind::Successful)
+                                    && raw_contact.is_some())
+                            {
+                                let mut pending_guard = context.pending.write().await;
+                                if let Some(PendingInvite::Outbound(pending)) =
+                                    pending_guard.get_mut(&call_id)
+                                {
+                                    if let Some(tag) = raw_remote_tag.clone() {
+                                        pending.upstream_remote_tag = Some(tag);
+                                    }
+                                    if matches!(status_kind, StatusCodeKind::Successful) {
+                                        if let Some(contact) = raw_contact.clone() {
+                                            pending.upstream_request_uri = contact;
+                                        }
+                                    }
+                                }
+                            }
+
                             Self::rewrite_contact_for_downstream(
                                 &mut upstream_response.headers,
                                 downstream_listener,
