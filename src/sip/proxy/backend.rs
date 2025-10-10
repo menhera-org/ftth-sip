@@ -607,9 +607,11 @@ impl RsipstackBackend {
             .and_then(|header| header.typed().ok())
         {
             typed_to.uri.host_with_port = to_host_with_port;
-            if let Some(dialog_uri) = dialog_uri {
-                typed_to.uri.auth = dialog_uri.auth.clone();
-                typed_to.uri.params = dialog_uri.params.clone();
+            if request.method == Method::Invite {
+                if let Some(dialog_uri) = dialog_uri {
+                    typed_to.uri.auth = dialog_uri.auth.clone();
+                    typed_to.uri.params = dialog_uri.params.clone();
+                }
             }
             if let Some(rewrite) = invite_isub {
                 Self::rewrite_uri_with_isub(&mut typed_to.uri, rewrite);
@@ -641,23 +643,19 @@ impl RsipstackBackend {
         }
         request.uri = request_uri;
 
-        let mut contact_uri = if let Some(contact) = target_contact {
-            let mut base_uri = contact.clone();
-            if let Some(auth) = base_uri.auth.as_mut() {
-                if auth.user.trim().is_empty() {
-                    *auth = UriAuth::from((identity, Option::<String>::None));
-                }
-            } else {
-                base_uri.auth = Some(UriAuth::from((identity, Option::<String>::None)));
-            }
-            base_uri
+        let contact_ip = if upstream_config.bind.address.is_unspecified() {
+            via_ip
         } else {
-            let mut uri = request.uri.clone();
-            uri.host_with_port = host_with_port.clone();
-            uri.auth = Some(UriAuth::from((identity, Option::<String>::None)));
-            uri
+            upstream_config.bind.address
         };
-        contact_uri.scheme = Some(Scheme::Sip);
+        let contact_port = if upstream_config.bind.port == 0 {
+            upstream_listener.port()
+        } else {
+            upstream_config.bind.port
+        };
+        let contact_uri =
+            Uri::try_from(format!("sip:{}@{}:{}", identity, contact_ip, contact_port).as_str())
+                .map_err(Error::sip_stack)?;
 
         let contact_header = Contact::from(format!("<{}>", contact_uri));
         request
