@@ -2889,7 +2889,7 @@ impl RsipstackBackend {
                 let upstream_request_uri = upstream_contact_uri
                     .clone()
                     .unwrap_or_else(|| original_request.uri.clone());
-                let original_dialog_uri = original_request.uri.clone();
+                let original_dialog_uri = original_request.from_header().ok().cloned().map(|h| h.uri().ok()).flatten().unwrap_or(original_request.uri.clone());
 
                 let media_session = context.media.allocate(media_key.clone()).await?;
 
