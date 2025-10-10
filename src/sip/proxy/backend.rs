@@ -2877,6 +2877,7 @@ impl RsipstackBackend {
                 )?;
 
                 let downstream_request_clone = downstream_request.clone();
+                let downstream_dialog_uri = downstream_request_clone.uri.clone();
 
                 let client_tx = match self
                     .start_client_transaction(
@@ -2910,7 +2911,7 @@ impl RsipstackBackend {
                         media: media_session.clone(),
                         media_key,
                         downstream_target: downstream_target.clone(),
-                        downstream_contact,
+                        downstream_contact: Some(downstream_dialog_uri.clone()),
                         downstream_local_tag: None,
                         cancel_token: cancel_token.clone(),
                         endpoint,
