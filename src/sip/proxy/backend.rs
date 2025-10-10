@@ -1,5 +1,5 @@
 use std::convert::TryFrom;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -167,7 +167,9 @@ impl SipBackend for RsipstackBackend {
             let mut guard = self.inner.upstream_transport.write().await;
             guard.replace(upstream_transport);
         }
-        *context.sockets.upstream.lock().await = Some(upstream_canonical);
+        let upstream_listener_addr =
+            Self::listener_socket_addr(&context.config.upstream.bind, upstream_canonical);
+        *context.sockets.upstream.lock().await = Some(upstream_listener_addr);
 
         let (downstream_conn, _downstream_addr, downstream_canonical) =
             create_udp_listener(&context.config.downstream.bind, cancel.child_token()).await?;
@@ -177,7 +179,9 @@ impl SipBackend for RsipstackBackend {
             let mut guard = self.inner.downstream_transport.write().await;
             guard.replace(downstream_transport);
         }
-        *context.sockets.downstream.lock().await = Some(downstream_canonical);
+        let downstream_listener_addr =
+            Self::listener_socket_addr(&context.config.downstream.bind, downstream_canonical);
+        *context.sockets.downstream.lock().await = Some(downstream_listener_addr);
 
         let user_agent = context.config.resolved_user_agent();
 
@@ -1380,6 +1384,29 @@ impl RsipstackBackend {
         Ok(sip)
     }
 
+    fn listener_socket_addr(bind: &BindConfig, canonical: SocketAddr) -> SocketAddr {
+        let ip = if bind.address.is_unspecified() {
+            match canonical {
+                SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            }
+        } else {
+            bind.address
+        };
+        SocketAddr::new(ip, canonical.port())
+    }
+
+    fn listener_matches(local: SocketAddr, listener: SocketAddr) -> bool {
+        if local.port() != listener.port() {
+            return false;
+        }
+        match listener.ip() {
+            IpAddr::V4(ip) if ip.is_unspecified() => true,
+            IpAddr::V6(ip) if ip.is_unspecified() => true,
+            _ => local.ip() == listener.ip(),
+        }
+    }
+
     async fn start_client_transaction(
         &self,
         endpoint: Arc<Endpoint>,
@@ -2306,9 +2333,9 @@ impl RsipstackBackend {
             .get_socketaddr()
             .map_err(Error::sip_stack)?;
 
-        if local_addr == downstream_listener {
+        if Self::listener_matches(local_addr, downstream_listener) {
             Ok(TransactionDirection::Downstream)
-        } else if local_addr == upstream_listener {
+        } else if Self::listener_matches(local_addr, upstream_listener) {
             Ok(TransactionDirection::Upstream)
         } else {
             Err(Error::Media(format!(
