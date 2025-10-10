@@ -577,19 +577,50 @@ impl RsipstackBackend {
         strip_rport_param(&mut via);
         request.headers.unique_push(rsip::Header::Via(via.into()));
 
-        let typed_from_source = original
+        let identity_uri_string = format!("sip:{}@{}", identity, upstream_config.sip_domain);
+        let identity_uri = Uri::try_from(identity_uri_string.as_str()).map_err(Error::sip_stack)?;
+
+        let mut typed_to = original
             .to_header()
             .ok()
-            .and_then(|header| header.typed().ok())
-            .unwrap_or_else(|| typed::To {
+            .and_then(|header| header.typed().ok());
+        if let Some(to_header) = typed_to.as_mut() {
+            to_header.uri.host_with_port = to_host_with_port.clone();
+            if let Some(dialog_uri) = dialog_uri {
+                to_header.uri.auth = dialog_uri.auth.clone();
+                to_header.uri.params = dialog_uri.params.clone();
+            }
+            if let Some(rewrite) = invite_isub {
+                Self::rewrite_uri_with_isub(&mut to_header.uri, rewrite);
+            }
+            if let Some(tag_value) = upstream_remote_tag {
+                to_header
+                    .params
+                    .retain(|param| !matches!(param, Param::Tag(_)));
+                to_header.params.push(Param::Tag(tag_value.clone()));
+            }
+        }
+
+        let mut typed_from = if request.method == Method::Invite {
+            if let Some(to_header) = typed_to.as_ref() {
+                typed::From {
+                    display_name: to_header.display_name.clone(),
+                    uri: to_header.uri.clone(),
+                    params: to_header.params.clone(),
+                }
+            } else {
+                typed::From {
+                    display_name: None,
+                    uri: request.uri.clone(),
+                    params: Vec::new(),
+                }
+            }
+        } else {
+            typed::From {
                 display_name: None,
-                uri: request.uri.clone(),
+                uri: identity_uri.clone(),
                 params: Vec::new(),
-            });
-        let mut typed_from = typed::From {
-            display_name: typed_from_source.display_name.clone(),
-            uri: typed_from_source.uri.clone(),
-            params: typed_from_source.params.clone(),
+            }
         };
         typed_from
             .params
@@ -601,30 +632,10 @@ impl RsipstackBackend {
             .headers
             .unique_push(rsip::Header::From(typed_from.into()));
 
-        if let Some(mut typed_to) = original
-            .to_header()
-            .ok()
-            .and_then(|header| header.typed().ok())
-        {
-            typed_to.uri.host_with_port = to_host_with_port;
-            if request.method == Method::Invite {
-                if let Some(dialog_uri) = dialog_uri {
-                    typed_to.uri.auth = dialog_uri.auth.clone();
-                    typed_to.uri.params = dialog_uri.params.clone();
-                }
-            }
-            if let Some(rewrite) = invite_isub {
-                Self::rewrite_uri_with_isub(&mut typed_to.uri, rewrite);
-            }
-            if let Some(tag_value) = upstream_remote_tag {
-                typed_to
-                    .params
-                    .retain(|param| !matches!(param, Param::Tag(_)));
-                typed_to.params.push(Param::Tag(tag_value.clone()));
-            }
+        if let Some(to_header) = typed_to {
             request
                 .headers
-                .unique_push(rsip::Header::To(typed_to.into()));
+                .unique_push(rsip::Header::To(to_header.into()));
         }
 
         let mut request_uri = if let Some(contact) = target_contact {
