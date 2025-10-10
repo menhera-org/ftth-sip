@@ -561,8 +561,7 @@ impl RsipstackBackend {
         };
         let host_with_port =
             HostWithPort::try_from(host_input.as_str()).map_err(Error::sip_stack)?;
-        request.uri.host_with_port = host_with_port.clone();
-        let to_host_with_port = request.uri.host_with_port.clone();
+        let to_host_with_port = host_with_port.clone();
 
         let via_ip = if upstream_config.bind.address.is_unspecified() {
             upstream_listener.ip()
@@ -633,7 +632,9 @@ impl RsipstackBackend {
             request_uri.auth = dialog_uri.auth.clone();
             request_uri.params = dialog_uri.params.clone();
         }
-        request_uri.host_with_port = host_with_port.clone();
+        if target_contact.is_none() {
+            request_uri.host_with_port = host_with_port.clone();
+        }
         if let Some(rewrite) = invite_isub {
             Self::rewrite_uri_with_isub(&mut request_uri, rewrite);
         }
