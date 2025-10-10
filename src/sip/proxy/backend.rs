@@ -2261,12 +2261,12 @@ impl RsipstackBackend {
                             .unwrap_or_else(|| pending.upstream_request_uri.clone());
 
                         let upstream_remote_uri = response
-                            .from_header()
+                            .to_header()
                             .ok()
                             .and_then(|header| header.typed().ok().map(|typed| typed.uri))
                             .unwrap_or_else(|| pending.upstream_remote_uri.clone());
                         let upstream_local_uri = response
-                            .to_header()
+                            .from_header()
                             .ok()
                             .and_then(|header| header.typed().ok().map(|typed| typed.uri))
                             .unwrap_or_else(|| pending.upstream_local_uri.clone());
@@ -3867,7 +3867,7 @@ impl RsipstackBackend {
                 };
                 if let Some(remote_uri) = tx
                     .original
-                    .to_header()
+                    .from_header()
                     .ok()
                     .and_then(|header| header.typed().ok().map(|typed| typed.uri))
                 {
