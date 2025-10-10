@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use ftth_rsipstack::EndpointBuilder;
 use ftth_rsipstack::rsip;
+use ftth_rsipstack::rsip::prelude::HasHeaders;
 use ftth_rsipstack::transaction::Endpoint;
 use ftth_rsipstack::transaction::endpoint::MessageInspector;
 use ftth_rsipstack::transaction::key::{TransactionKey, TransactionRole};
@@ -1538,7 +1539,7 @@ impl RsipstackBackend {
                     .clone()
                     .or_else(|| Some(call.upstream_request_uri.clone()));
 
-                let upstream_request = Self::prepare_upstream_request(
+                let mut upstream_request = Self::prepare_upstream_request(
                     &endpoint,
                     upstream_listener,
                     &config.upstream,
@@ -1552,6 +1553,17 @@ impl RsipstackBackend {
                     target_contact.as_ref(),
                     Some(&call.upstream_remote_uri),
                 )?;
+
+                upstream_request
+                    .headers_mut()
+                    .unique_push(rsip::Header::From(
+                        rsip::typed::From {
+                            display_name: None,
+                            uri: call.upstream_local_uri.clone(),
+                            params: vec![Param::Tag(call.upstream_local_tag.clone())],
+                        }
+                        .into(),
+                    ));
 
                 let mut client_tx = self
                     .start_client_transaction(
@@ -3584,7 +3596,7 @@ impl RsipstackBackend {
                     .clone()
                     .or_else(|| Some(call.upstream_request_uri.clone()));
 
-                let upstream_request = Self::prepare_upstream_request(
+                let mut upstream_request = Self::prepare_upstream_request(
                     &endpoint,
                     upstream_listener,
                     &config.upstream,
@@ -3598,6 +3610,17 @@ impl RsipstackBackend {
                     target_contact.as_ref(),
                     Some(&call.upstream_remote_uri),
                 )?;
+
+                upstream_request
+                    .headers_mut()
+                    .unique_push(rsip::Header::From(
+                        rsip::typed::From {
+                            display_name: None,
+                            uri: call.upstream_local_uri.clone(),
+                            params: vec![Param::Tag(call.upstream_local_tag.clone())],
+                        }
+                        .into(),
+                    ));
 
                 let mut client_tx = self
                     .start_client_transaction(
