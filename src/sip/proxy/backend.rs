@@ -2845,7 +2845,14 @@ impl RsipstackBackend {
                     }
                     guard.original.clone()
                 };
-                let upstream_request_uri = original_request.uri.clone();
+                let upstream_contact_uri = original_request
+                    .contact_header()
+                    .ok()
+                    .and_then(|header| header.typed().ok().map(|typed| typed.uri));
+                let upstream_request_uri = upstream_contact_uri
+                    .clone()
+                    .unwrap_or_else(|| original_request.uri.clone());
+                let original_dialog_uri = original_request.uri.clone();
 
                 let media_session = context.media.allocate(media_key.clone()).await?;
 
@@ -2883,14 +2890,14 @@ impl RsipstackBackend {
                     media: media_session.clone(),
                     media_key: media_key.clone(),
                     upstream_target: Self::build_trunk_target(&config.upstream),
-                    upstream_contact: None,
+                    upstream_contact: upstream_contact_uri.clone(),
                     downstream_contact: downstream_contact_clone,
                     upstream_local_tag: upstream_local_tag.clone(),
                     upstream_remote_tag: upstream_remote_tag.clone(),
                     downstream_target: downstream_target.clone(),
                     downstream_local_tag: None,
                     upstream_request_uri: upstream_request_uri.clone(),
-                    upstream_dialog_uri: original_request.uri.clone(),
+                    upstream_dialog_uri: original_dialog_uri.clone(),
                     identity: identity.clone(),
                 };
 
@@ -2950,7 +2957,7 @@ impl RsipstackBackend {
                         upstream_local_tag: upstream_local_tag.clone(),
                         upstream_remote_tag: upstream_remote_tag.clone(),
                         upstream_request_uri: upstream_request_uri.clone(),
-                        upstream_dialog_uri: upstream_request_uri.clone(),
+                        upstream_dialog_uri: original_dialog_uri,
                     }),
                 );
 
