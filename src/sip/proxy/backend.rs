@@ -556,12 +556,6 @@ impl RsipstackBackend {
         request.uri.host_with_port = host_with_port;
         let to_host_with_port = request.uri.host_with_port.clone();
 
-        if request.method == Method::Invite {
-            if let Some(rewrite) = invite_isub {
-                Self::rewrite_uri_with_isub(&mut request.uri, rewrite);
-            }
-        }
-
         let via_ip = if upstream_config.bind.address.is_unspecified() {
             upstream_listener.ip()
         } else {
@@ -606,10 +600,8 @@ impl RsipstackBackend {
             .and_then(|header| header.typed().ok())
         {
             typed_to.uri.host_with_port = to_host_with_port;
-            if request.method == Method::Invite {
-                if let Some(rewrite) = invite_isub {
-                    Self::rewrite_uri_with_isub(&mut typed_to.uri, rewrite);
-                }
+            if let Some(rewrite) = invite_isub {
+                Self::rewrite_uri_with_isub(&mut typed_to.uri, rewrite);
             }
             if let Some(tag_value) = upstream_remote_tag {
                 typed_to
@@ -623,7 +615,13 @@ impl RsipstackBackend {
         }
 
         if let Some(contact) = target_contact {
-            request.uri = contact.clone();
+            let mut uri = contact.clone();
+            if let Some(rewrite) = invite_isub {
+                Self::rewrite_uri_with_isub(&mut uri, rewrite);
+            }
+            request.uri = uri;
+        } else if let Some(rewrite) = invite_isub {
+            Self::rewrite_uri_with_isub(&mut request.uri, rewrite);
         }
 
         let contact_ip = if upstream_config.bind.address.is_unspecified() {
@@ -1278,15 +1276,13 @@ impl RsipstackBackend {
         }
 
         let contact_user = if strip_user {
-            target_user
-                .as_deref()
-                .unwrap_or_else(|| {
-                    if call.identity.is_empty() {
-                        "proxy"
-                    } else {
-                        call.identity.as_str()
-                    }
-                })
+            target_user.as_deref().unwrap_or_else(|| {
+                if call.identity.is_empty() {
+                    "proxy"
+                } else {
+                    call.identity.as_str()
+                }
+            })
         } else if call.identity.is_empty() {
             "proxy"
         } else {
@@ -2105,9 +2101,9 @@ impl RsipstackBackend {
                 if matches!(status.kind(), StatusCodeKind::Successful) =>
             {
                 let mut downstream_contact = response
-                        .contact_header()
-                        .ok()
-                        .and_then(|header| header.typed().ok().map(|typed| typed.uri));
+                    .contact_header()
+                    .ok()
+                    .and_then(|header| header.typed().ok().map(|typed| typed.uri));
                 let downstream_target = downstream_contact
                     .as_ref()
                     .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
@@ -2814,8 +2810,7 @@ impl RsipstackBackend {
 
                 let task_upstream_local_tag = upstream_local_tag.clone();
                 let task_upstream_remote_tag = upstream_remote_tag.clone();
-                let task_upstream_local_user =
-                    to_user.unwrap_or_else(|| identity.clone());
+                let task_upstream_local_user = to_user.unwrap_or_else(|| identity.clone());
 
                 let downstream_contact_clone = downstream_contact.clone();
                 let call_template = CallContext {
