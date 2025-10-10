@@ -2561,7 +2561,7 @@ impl RsipstackBackend {
                     .unwrap_or_else(|| "<unknown>".to_string());
                 let callee_display = downstream_contact
                     .as_ref()
-                    .and_then(|uri| Self::uri_identity(uri))
+                    .and_then(Self::uri_identity)
                     .unwrap_or_else(|| pending.identity.clone());
                 info!(
                     %call_id,
