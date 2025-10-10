@@ -2812,9 +2812,28 @@ impl RsipstackBackend {
                 let to_user = to_header
                     .as_ref()
                     .and_then(|typed| typed.uri.auth.as_ref().map(|auth| auth.user.clone()));
-                let identity = to_user
-                    .clone()
+                let request_user = tx.original.uri.auth.as_ref().map(|auth| auth.user.clone());
+                let request_user = request_user.map(|user| {
+                    if let Some(rewrite) = Self::detect_invite_isub(&tx.original.uri) {
+                        rewrite.base_user
+                    } else {
+                        user
+                    }
+                });
+                let identity = request_user
                     .filter(|user| Self::identity_allowed(user, &config.upstream))
+                    .or_else(|| {
+                        to_user
+                            .clone()
+                            .map(|user| {
+                                if let Some(rewrite) = Self::detect_invite_isub(&tx.original.uri) {
+                                    rewrite.base_user
+                                } else {
+                                    user
+                                }
+                            })
+                            .filter(|user| Self::identity_allowed(user, &config.upstream))
+                    })
                     .or_else(|| {
                         let default = config.upstream.default_identity.clone();
                         if default.is_empty() {
