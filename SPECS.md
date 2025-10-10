@@ -1,6 +1,6 @@
 # Specifications
 
-This is a SIP and media (PCMU only) proxy between an NTT Hikari Denwa (NGN) trunk, and a single downstream client. This crate need only to support Linux-based OSes. This crate has many NTT specifics, explained below.
+This is a SIP and media (PCMU only) proxy between an NTT Hikari Denwa (NGN) trunk, and a single downstream client. This crate needs only to support Linux-based OSes. This crate has many NTT specifics, explained below.
 
 ## Configuration
 Programs that use this lib crate fetches NGN configuration info using DHCPv4/DHCPv6. That is covered in [ftth-dhcp](https://github.com/menhera-org/ftth-dhcp).
@@ -8,7 +8,7 @@ Programs that use this lib crate fetches NGN configuration info using DHCPv4/DHC
 The user of this library configures the following (non exhaustive):
 
 - The main number assigned by NTT
-- Any additioinal numbers assigned by NTT (through DHCP, up to only four additional numbers are notified us; when there are more than 4 additional numbers, no such additional numbers are told us through DHCP).
+- Any additional numbers assigned by NTT (through DHCP, up to only four additional numbers are notified us; when there are more than 4 additional numbers, no such additional numbers are told us through DHCP).
     - Any numbers, that is sent to us in `200 OK`s to our REGISTERs toward the trunk, in `P-Associated-URI` header (we extract the userinfo part of the SIP URIs), must be stored separately, and they are treated as additional numbers assigned by NTT.
 - The trunk-leg network interface to bind to.
 - The trunk-leg network address (that is assigned to us through DHCP). (port is UDP 5060)
@@ -23,15 +23,17 @@ The user of this library configures the following (non exhaustive):
 
 ## Registrations
 ### Downstream client
-- Downstream client need to REGISTER itself to our proxy.
+- Downstream client needs to REGISTER itself to our proxy.
 - We remember that client's contact as the downstream.
 - Authentication is optional.
+- Registration interval is arbitrary, with a minimum of 30 seconds. We follow that timer to track registration states.
 
 ### Registration to the trunk
-- Our proxy also need to REGISTER ourselves to the upstream SIP server.
+- Our proxy also needs to REGISTER ourselves to the upstream SIP server.
 - Request URI of the REGISTER request must be `sip:<trunk domain>`.
 - rport parameter is not permitted.
 - `Contact` header contains: `<sip:(random string)@(trunk interface address)>`.
+- Registration expiration must be set to 3600 seconds. Re-REGISTERs happen after the seconds calculated by: `0.4 * <Expires header value on previous 200 OK to REGISTER>`.
 
 ## Incoming calls from the trunk
 - Remember the `From:` header URIs on incoming calls, and use them as the `To:` headers sent to the trunk on that call.
@@ -45,10 +47,10 @@ The user of this library configures the following (non exhaustive):
 ## Outgoing calls from the client
 - Make the SIP URI in the `P-Preferred-Identity` header the authoritative source of the caller ID the client wants to use, with reasonable fallbacks to other headers.
 - If isub parameter is present in the caller ID the client presents to us, store that parameter (if not empty) and take no special action on that.
-- Match the caller ID's userinfo part (this does NOT include the isub or other parameters) against the **ALLOWED_IDENTITIES**. If no match were found, force the use of the main number configured.
+- Match the caller ID's userinfo part (this does NOT include the isub or other parameters) against the **ALLOWED_IDENTITIES**. If no match was found, force the use of the main number configured.
 - Extract the userinfo part of the INVITE sent to us from the client. The result is used as the called party number, with following notes:
     - If the userinfo part has `*` in the middle, treat the part before `*` as the called party number, with the part after `*` used as the isub parameter of the called party. This overwrites the isub parameter that may have been present before.
-    - Allowed characters in the userinfo / isub parameter match what are representable with standard DTMF tones (0 to 9, `*` (`%2a`) and `#` (`%23`)). If other characters are found, reject the call with 404s. The exception is `-` character, which is just stripped out. When `*` and `#` are not correctly escaped 
+    - Allowed characters in the userinfo / isub parameter match what are representable with standard DTMF tones (0 to 9, `*` (`%2a`) and `#` (`%23`)). If other characters are found, reject the call with 404s. The exception is `-` character, which is just stripped out. When `*` and `#` are not correctly escaped we escape these characters on our own.
     - After the pre-processing described above is done, if the called party number becomes empty, reject the call.
 - Construct the request line of the SIP request, as follows:
     - Method is `INVITE`
