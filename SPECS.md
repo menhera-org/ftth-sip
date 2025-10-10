@@ -25,8 +25,9 @@ The user of this library configures the following (non exhaustive):
 ### Downstream client
 - Downstream client needs to REGISTER itself to our proxy.
 - We remember that client's contact as the downstream.
-- Authentication is optional.
+- Authentication is optional (not usually used).
 - Registration interval is arbitrary, with a minimum of 30 seconds. We follow that timer to track registration states.
+- `Contact` values' userinfo parts are arbitrary in REGISTERs toward our proxy.
 
 ### Registration to the trunk
 - Our proxy also needs to REGISTER ourselves to the upstream SIP server.
@@ -34,6 +35,7 @@ The user of this library configures the following (non exhaustive):
 - rport parameter is not permitted.
 - `Contact` header contains: `<sip:(random string)@(trunk interface address)>`.
 - Registration expiration must be set to 3600 seconds. Re-REGISTERs happen after the seconds calculated by: `0.4 * <Expires header value on previous 200 OK to REGISTER>`.
+- There should be no authentication requirements by the trunk. We don't do authenticate our proxy against the trunk.
 
 ## Incoming calls from the trunk
 - Remember the `From:` header URIs on incoming calls, and use them as the `To:` headers sent to the trunk on that call.
@@ -47,7 +49,7 @@ The user of this library configures the following (non exhaustive):
 ## Outgoing calls from the client
 - Make the SIP URI in the `P-Preferred-Identity` header the authoritative source of the caller ID the client wants to use, with reasonable fallbacks to other headers.
 - If isub parameter is present in the caller ID the client presents to us, store that parameter (if not empty) and take no special action on that.
-- Match the caller ID's userinfo part (this does NOT include the isub or other parameters) against the **ALLOWED_IDENTITIES**. If no match was found, force the use of the main number configured.
+- Match the caller ID's userinfo part (this does NOT include the isub or other parameters) against the **ALLOWED_IDENTITIES**. If no match was found, force the use of the main number configured. Use this computed value inside `From` headers and `P-Preferred-Identity` headers.
 - Extract the userinfo part of the INVITE sent to us from the client. The result is used as the called party number, with following notes:
     - If the userinfo part has `*` in the middle, treat the part before `*` as the called party number, with the part after `*` used as the isub parameter of the called party. This overwrites the isub parameter that may have been present before.
     - Allowed characters in the userinfo / isub parameter match what are representable with standard DTMF tones (0 to 9, `*` (`%2a`) and `#` (`%23`)). If other characters are found, reject the call with 404s. The exception is `-` character, which is just stripped out. When `*` and `#` are not correctly escaped we escape these characters on our own.
@@ -59,4 +61,16 @@ The user of this library configures the following (non exhaustive):
 - `To:` headers of the INVITEs sent to the trunk mirror the Request URIs of those requests.
 - Remember the tag in `From` header in responses from the trunk. And use that value as `To` headers' tag values we send during that call.
 - `From` value we use for outgoing requests are remembered alongside the tags, and use that for messages we send to the trunk during that call.
-- No `rport` parameters are allowed inside `Via` headers.
+- No `rport` parameters are allowed inside `Via` headers. AVia headers need to contain: `SIP/2.0/UDP (the trunk interface IP):5060;branch=z9hG4bK(...)`.
+- `Route` header must have the values computed by combining:
+    - `Path` header values in `200 OK` trunk responses to REGISTERs we send.
+    - `Service-Route` values in `200 OK` trunk responses to REGISTERs we send.
+- `Contact` header contains: `<sip:(random string)@(trunk interface address)>`.
+- `From` header contains: `<sip:(main number)@(trunk domain)>`.
+- We must not send `P-Asserted-Identity` headers to the trunk.
+
+## Media proxying
+- We must use the media port between 49152 and 65535 per NTT specs, and we default to 50000-60000.
+- In SDP, `m=audio` line is required and PCMU is mandatory.
+- In SDP, `a=sendrecv` must be set.
+- In SDP, `a=ptime:20` is expected per NTT specs.
