@@ -29,7 +29,7 @@ use rsip::message::headers_ext::HeadersExt;
 use rsip::typed;
 use rsip::{
     Method, Param, Response, SipMessage, StatusCode, StatusCodeKind, Uri,
-    host_with_port::HostWithPort, transport::Transport,
+    host_with_port::{Host, HostWithPort}, transport::Transport,
 };
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
@@ -137,6 +137,8 @@ struct BackendInner {
     registrar: RwLock<Option<Arc<UpstreamRegistrar>>>,
     upstream_transport: RwLock<Option<SipConnection>>,
     downstream_transport: RwLock<Option<SipConnection>>,
+    upstream_local: RwLock<Option<SocketAddr>>,
+    downstream_local: RwLock<Option<SocketAddr>>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +162,8 @@ impl Default for RsipstackBackend {
                 registrar: RwLock::new(None),
                 upstream_transport: RwLock::new(None),
                 downstream_transport: RwLock::new(None),
+                upstream_local: RwLock::new(None),
+                downstream_local: RwLock::new(None),
             }),
         }
     }
@@ -185,6 +189,10 @@ impl SipBackend for RsipstackBackend {
             let mut guard = self.inner.upstream_transport.write().await;
             guard.replace(upstream_transport);
         }
+        {
+            let mut guard = self.inner.upstream_local.write().await;
+            guard.replace(upstream_canonical);
+        }
         let upstream_listener_addr =
             Self::listener_socket_addr(&context.config.upstream.bind, upstream_canonical);
         *context.sockets.upstream.lock().await = Some(upstream_listener_addr);
@@ -196,6 +204,10 @@ impl SipBackend for RsipstackBackend {
         {
             let mut guard = self.inner.downstream_transport.write().await;
             guard.replace(downstream_transport);
+        }
+        {
+            let mut guard = self.inner.downstream_local.write().await;
+            guard.replace(downstream_canonical);
         }
         let downstream_listener_addr =
             Self::listener_socket_addr(&context.config.downstream.bind, downstream_canonical);
@@ -1600,9 +1612,22 @@ impl RsipstackBackend {
                 .map_err(|err| Error::Media(err.to_string()))?,
         };
 
-        let mut sip: SipAddr = SocketAddr::new(ip, port).into();
+        Ok(Self::sip_addr_from_socket(SocketAddr::new(ip, port)))
+    }
+
+    fn sip_addr_from_socket(addr: SocketAddr) -> SipAddr {
+        let mut sip: SipAddr = addr.into();
         sip.r#type = Some(Transport::Udp);
-        Ok(sip)
+        sip
+    }
+
+    fn socket_addr_from_host_with_port(value: &HostWithPort) -> Option<SocketAddr> {
+        let port = value.port.map(|p| *p.value()).unwrap_or(5060);
+        let ip = match &value.host {
+            Host::IpAddr(addr) => *addr,
+            Host::Domain(domain) => domain.to_string().parse::<IpAddr>().ok()?,
+        };
+        Some(SocketAddr::new(ip, port))
     }
 
     fn listener_socket_addr(bind: &BindConfig, canonical: SocketAddr) -> SocketAddr {
@@ -1635,6 +1660,12 @@ impl RsipstackBackend {
         target: SipAddr,
         binding: ClientTarget,
     ) -> Result<Transaction> {
+        if let Some(target_addr) = Self::socket_addr_from_host_with_port(&target.addr) {
+            if self.is_local_destination(&target_addr).await {
+                warn!(%target_addr, ?binding, "detected attempt to send to local address; blocking");
+                return Err(Error::configuration("refusing to send SIP message to local address"));
+            }
+        }
         if matches!(binding, ClientTarget::Downstream) {
             request.headers.retain(|header| {
                 !matches!(
@@ -1662,6 +1693,34 @@ impl RsipstackBackend {
         tx.destination = Some(target);
         tx.send().await.map_err(Error::sip_stack)?;
         Ok(tx)
+    }
+
+    async fn is_local_destination(&self, target: &SocketAddr) -> bool {
+        {
+            let guard = self.inner.upstream_local.read().await;
+            if guard
+                .as_ref()
+                .map(|local| Self::socket_addr_equal(local, target))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+        {
+            let guard = self.inner.downstream_local.read().await;
+            if guard
+                .as_ref()
+                .map(|local| Self::socket_addr_equal(local, target))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn socket_addr_equal(lhs: &SocketAddr, rhs: &SocketAddr) -> bool {
+        lhs.ip() == rhs.ip() && lhs.port() == rhs.port()
     }
 
     async fn relay_dialog_request(
@@ -2874,21 +2933,20 @@ impl RsipstackBackend {
                     let guard = context.registrations.read().await;
                     guard.get().map(|reg| reg.source)
                 };
+                let transaction_source = tx
+                    .original
+                    .via_header()
+                    .ok()
+                    .and_then(|via| resolve_remote_from_via(via).ok())
+                    .map(Self::sip_addr_from_socket);
 
                 let downstream_target = downstream_contact_uri
                     .as_ref()
                     .and_then(|uri| Self::sip_addr_from_uri(uri).ok())
-                    .or_else(|| {
-                        registration_source.map(|addr| {
-                            let mut sip: SipAddr = addr.into();
-                            sip.r#type = Some(Transport::Udp);
-                            sip
-                        })
-                    })
+                    .or_else(|| registration_source.map(Self::sip_addr_from_socket))
+                    .or(transaction_source)
                     .unwrap_or_else(|| {
-                        let mut sip: SipAddr = context.config.downstream.bind.socket_addr().into();
-                        sip.r#type = Some(Transport::Udp);
-                        sip
+                        Self::sip_addr_from_socket(context.config.downstream.bind.socket_addr())
                     });
 
                 let downstream_tx = Arc::new(Mutex::new(tx));
