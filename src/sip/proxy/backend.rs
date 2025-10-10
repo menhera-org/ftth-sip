@@ -627,7 +627,6 @@ impl RsipstackBackend {
         target_contact: Option<&Uri>,
         remote_from_uri: Option<&Uri>,
         local_from_uri: Option<&Uri>,
-        contact_user: &str,
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
 
@@ -782,10 +781,8 @@ impl RsipstackBackend {
         };
         let contact_addr = SocketAddr::new(contact_ip, contact_port);
         let contact_host = format_socket_for_sip(&contact_addr);
-        let contact_uri = Uri::try_from(
-            format!("sip:{}@{}", contact_user, contact_host).as_str(),
-        )
-        .map_err(Error::sip_stack)?;
+        let contact_uri =
+            Uri::try_from(format!("sip:{}", contact_host).as_str()).map_err(Error::sip_stack)?;
 
         let contact_header = Contact::from(format!("<{}>", contact_uri));
         request
@@ -1644,7 +1641,6 @@ impl RsipstackBackend {
 
                 let route_set = { context.route_set.read().await.clone() };
                 let allowed_guard = context.allowed_identities.read().await;
-                let contact_user = context.upstream_contact_user.clone();
 
                 let target_contact = call
                     .upstream_contact
@@ -1666,7 +1662,6 @@ impl RsipstackBackend {
                     target_contact.as_ref(),
                     Some(&call.upstream_remote_uri),
                     Some(&call.upstream_local_uri),
-                    contact_user.as_ref(),
                 )?;
                 drop(allowed_guard);
 
@@ -2863,7 +2858,6 @@ impl RsipstackBackend {
                 let config = context.config.as_ref();
                 let route_set = { context.route_set.read().await.clone() };
                 let allowed_guard = context.allowed_identities.read().await;
-                let contact_user = context.upstream_contact_user.clone();
                 let upstream_local_tag = Tag::default();
                 let upstream_request = Self::prepare_upstream_request(
                     &endpoint,
@@ -2880,7 +2874,6 @@ impl RsipstackBackend {
                     None,
                     Some(&original_request.uri),
                     None,
-                    contact_user.as_ref(),
                 )?;
                 drop(allowed_guard);
 
@@ -3301,7 +3294,6 @@ impl RsipstackBackend {
                 let config = context.config.as_ref();
                 let route_set = { context.route_set.read().await.clone() };
                 let allowed_guard = context.allowed_identities.read().await;
-                let contact_user = context.upstream_contact_user.clone();
                 let target_contact = call
                     .upstream_contact
                     .as_ref()
@@ -3321,7 +3313,6 @@ impl RsipstackBackend {
                     target_contact,
                     Some(&call.upstream_remote_uri),
                     Some(&call.upstream_local_uri),
-                    contact_user.as_ref(),
                 )?;
                 drop(allowed_guard);
 
@@ -3404,7 +3395,6 @@ impl RsipstackBackend {
                 let config = context.config.as_ref();
                 let route_set = { context.route_set.read().await.clone() };
                 let allowed_guard = context.allowed_identities.read().await;
-                let contact_user = context.upstream_contact_user.clone();
 
                 let upstream_contact = pending
                     .upstream_request
@@ -3430,7 +3420,6 @@ impl RsipstackBackend {
                     target_contact,
                     Some(&pending.upstream_dialog_uri),
                     Some(&pending.upstream_local_uri),
-                    contact_user.as_ref(),
                 )?;
                 drop(allowed_guard);
 
@@ -3601,7 +3590,6 @@ impl RsipstackBackend {
                 let config = context.config.as_ref();
                 let route_set = { context.route_set.read().await.clone() };
                 let allowed_guard = context.allowed_identities.read().await;
-                let contact_user = context.upstream_contact_user.clone();
 
                 let upstream_contact = pending
                     .upstream_request
@@ -3628,7 +3616,6 @@ impl RsipstackBackend {
                     target_contact,
                     Some(&pending.upstream_dialog_uri),
                     Some(&pending.upstream_local_uri),
-                    contact_user.as_ref(),
                 )?;
                 drop(allowed_guard);
 
@@ -3792,7 +3779,6 @@ impl RsipstackBackend {
                 let config = context.config.as_ref();
                 let route_set = { context.route_set.read().await.clone() };
                 let allowed_guard = context.allowed_identities.read().await;
-                let contact_user = context.upstream_contact_user.clone();
 
                 let target_contact = call
                     .upstream_contact
@@ -3814,7 +3800,6 @@ impl RsipstackBackend {
                     target_contact.as_ref(),
                     Some(&call.upstream_remote_uri),
                     Some(&call.upstream_local_uri),
-                    contact_user.as_ref(),
                 )?;
                 drop(allowed_guard);
 

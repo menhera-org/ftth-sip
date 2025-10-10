@@ -241,8 +241,7 @@ impl UpstreamRegistrar {
         };
 
         let address_literal = format_socket_for_sip(&local_socket);
-        let contact_user = self.context.upstream_contact_user.as_ref().clone();
-        let contact_uri = format!("sip:{}@{}", contact_user, address_literal);
+        let contact_uri = format!("sip:{}", address_literal);
 
         #[allow(unused_mut)]
         let mut request = rsip::Request {

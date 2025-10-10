@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::sync::watch;
@@ -12,7 +11,7 @@ use crate::media::MediaRelayBuilder;
 use super::backend::{RsipstackBackend, SipBackend};
 use super::state::{DownstreamAuthState, ListenerSockets, SipContext};
 use crate::sip::registration::RegistrationCache;
-use super::utils::{canonicalize_identity, md5_hex};
+use super::utils::canonicalize_identity;
 
 pub struct FtthSipProxyBuilder<B = RsipstackBackend> {
     config: crate::config::ProxyConfig,
@@ -50,16 +49,6 @@ where
                 allowed_identities.insert(canonical);
             }
         }
-        let contact_seed = format!(
-            "{}:{}:{:?}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos(),
-            std::thread::current().id()
-        );
-        let upstream_contact_user = format!("ct{}", md5_hex(contact_seed.as_bytes()));
         let context = SipContext {
             config: Arc::new(self.config),
             media: Arc::new(media),
@@ -68,7 +57,6 @@ where
             calls: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             route_set: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             allowed_identities: Arc::new(tokio::sync::RwLock::new(allowed_identities)),
-            upstream_contact_user: Arc::new(upstream_contact_user),
             auth: Arc::new(DownstreamAuthState::new()),
             pending: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         };

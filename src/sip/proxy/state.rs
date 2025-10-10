@@ -27,7 +27,6 @@ pub struct SipContext {
     pub calls: Arc<RwLock<HashMap<String, CallContext>>>,
     pub route_set: Arc<RwLock<Vec<rsip::common::uri::UriWithParams>>>,
     pub allowed_identities: Arc<RwLock<HashSet<String>>>,
-    pub upstream_contact_user: Arc<String>,
     pub(super) auth: Arc<DownstreamAuthState>,
     pub(super) pending: Arc<RwLock<HashMap<String, PendingInvite>>>,
 }

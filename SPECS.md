@@ -23,6 +23,9 @@ The user of this library configures the following (non exhaustive):
 - **ALLOWED_IDENTITIES**: the main number configured, the additional numbers configured, and numbers sent to us in `P-Associated-URI` headers from the trunk (see above). If any of these numbers matches a number we want to call as, we can think that we are allowed to make calls as that number toward the trunk.
 - **CALLED_PARTY_NUMBER**: userinfo part of `P-Called-Party-ID` headers in incoming calls from the trunk, with fall-back to `To:` header when no such header is present.
 
+## General
+- In every `Via` header sent the trunk there must be no `rport` parameters.
+
 ## Registrations
 ### Downstream client
 - Downstream client needs to REGISTER itself to our proxy.
@@ -37,10 +40,10 @@ The user of this library configures the following (non exhaustive):
 - Our proxy also needs to REGISTER ourselves to the upstream SIP server.
 - Request URI of the REGISTER request must be `sip:<trunk domain>`.
 - rport parameter is not permitted.
-- `Contact` header contains: `<sip:(random string)@(trunk interface address)>`. That random string is used throughout the lifetime of our proxy. (Re-launch of the proxy may change the value). `transport` parameters are forbidden inside this header.
+- `Contact` header contains: `<sip:(trunk interface address)>`. `transport` parameters are forbidden inside this header.
 - Registration expiration must be set to 3600 seconds. Re-REGISTERs happen after the seconds calculated by: `0.4 * <Expires header value on previous 200 OK to REGISTER>`.
 - There should be no authentication requirements by the trunk. We don't authenticate our proxy against the trunk.
-- `Via` header must contain: `SIP/2.0/UDP (trunk interface address):5060;branch=z9hG4bK(...)`, and must not contain `transport` parameters. Branch value must differ in re-REGISTERs every time.
+- `Via` header must contain: `SIP/2.0/UDP (trunk interface address):5060;branch=z9hG4bK(...)`, and must not contain `transport` parameters. Branch value must differ in re-REGISTERs every time. `rport` in Via headers is forbidden.
 - `From` header to the trunk must contain: `<sip:(main number)@(trunk domain)>;tag=(...)`. Tag must differ per (re-)registrations.
 - `To` header to the trunk must contain: `<sip:(main number)@(trunk domain)>`.
 
@@ -73,7 +76,7 @@ The user of this library configures the following (non exhaustive):
 - `Route` header must have the values computed by combining:
     - `Path` header values in `200 OK` trunk responses to REGISTERs we send.
     - `Service-Route` values in `200 OK` trunk responses to REGISTERs we send.
-- `Contact` header contains: `<sip:(random string)@(trunk interface address)>`.
+- `Contact` header contains: `<sip:(trunk interface address)>`.
 - `From` header contains: `<sip:(main number)@(trunk domain)>`.
 - We must not send `P-Asserted-Identity` headers to the trunk.
 
