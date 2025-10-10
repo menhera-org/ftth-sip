@@ -1813,6 +1813,7 @@ impl RsipstackBackend {
         media_session: MediaSessionHandle,
         cancel_token: CancellationToken,
         context: SipContext,
+        call_id: String,
     ) -> Result<(
         Option<StatusCode>,
         Option<Response>,
@@ -1852,6 +1853,21 @@ impl RsipstackBackend {
                                         .ok()
                                         .and_then(|header| header.tag().ok().flatten())
                                 });
+                            if raw_contact.is_some() || raw_remote_tag.is_some() {
+                                let contact_for_pending = raw_contact.clone();
+                                let remote_tag_for_pending = raw_remote_tag.clone();
+                                let mut pending_guard = context.pending.write().await;
+                                if let Some(PendingInvite::Outbound(pending)) =
+                                    pending_guard.get_mut(&call_id)
+                                {
+                                    if let Some(contact) = contact_for_pending {
+                                        pending.upstream_request_uri = contact;
+                                    }
+                                    if let Some(tag) = remote_tag_for_pending {
+                                        pending.upstream_remote_tag = Some(tag);
+                                    }
+                                }
+                            }
 
                             Self::expand_compact_headers(&mut upstream_response.headers);
                             upstream_response.headers.retain(|header| {
@@ -2751,6 +2767,7 @@ impl RsipstackBackend {
                             task_media,
                             task_cancel,
                             context_clone.clone(),
+                            call_id_clone.clone(),
                         )
                         .await;
                     backend
