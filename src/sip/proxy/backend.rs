@@ -72,6 +72,14 @@ impl ProxyMessageInspector {
         }
     }
 
+    fn strip_rport_headers(headers: &mut rsip::Headers) {
+        for header in headers.iter_mut() {
+            if let rsip::Header::Via(via) = header {
+                Self::strip_rport(via);
+            }
+        }
+    }
+
     fn apply_user_agent(headers: &mut rsip::headers::Headers, value: &str) {
         headers.retain(|header| {
             !matches!(header, rsip::Header::UserAgent(_))
@@ -90,13 +98,12 @@ impl MessageInspector for ProxyMessageInspector {
     fn before_send(&self, msg: SipMessage) -> SipMessage {
         match msg {
             SipMessage::Request(mut req) => {
-                if let Ok(via) = req.via_header_mut() {
-                    Self::strip_rport(via);
-                }
+                Self::strip_rport_headers(&mut req.headers);
                 Self::apply_user_agent(&mut req.headers, &self.user_agent);
                 SipMessage::Request(req)
             }
             SipMessage::Response(mut res) => {
+                Self::strip_rport_headers(&mut res.headers);
                 Self::apply_user_agent(&mut res.headers, &self.user_agent);
                 SipMessage::Response(res)
             }
