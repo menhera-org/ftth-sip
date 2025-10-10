@@ -507,6 +507,7 @@ impl RsipstackBackend {
         upstream_remote_tag: Option<&Tag>,
         target_contact: Option<&Uri>,
         dialog_uri: Option<&Uri>,
+        local_from_uri: Option<&Uri>,
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
 
@@ -615,6 +616,12 @@ impl RsipstackBackend {
                     uri: request.uri.clone(),
                     params: Vec::new(),
                 }
+            }
+        } else if let Some(local_uri) = local_from_uri {
+            typed::From {
+                display_name: None,
+                uri: local_uri.clone(),
+                params: Vec::new(),
             }
         } else {
             typed::From {
@@ -1552,6 +1559,7 @@ impl RsipstackBackend {
                     call.upstream_remote_tag.as_ref(),
                     target_contact.as_ref(),
                     Some(&call.upstream_remote_uri),
+                    Some(&call.upstream_local_uri),
                 )?;
 
                 if let Some(from_header) = upstream_request
@@ -2746,6 +2754,7 @@ impl RsipstackBackend {
                     None,
                     None,
                     Some(&original_request.uri),
+                    None,
                 )?;
 
                 let target = Self::build_trunk_target(&config.upstream);
@@ -2955,12 +2964,12 @@ impl RsipstackBackend {
                     .clone()
                     .unwrap_or_else(|| original_request.uri.clone());
                 let upstream_remote_uri_initial = original_request
-                    .to_header()
+                    .from_header()
                     .ok()
                     .and_then(|header| header.typed().ok().map(|typed| typed.uri))
                     .unwrap_or_else(|| upstream_request_uri.clone());
                 let upstream_local_uri_initial = original_request
-                    .from_header()
+                    .to_header()
                     .ok()
                     .and_then(|header| header.typed().ok().map(|typed| typed.uri))
                     .unwrap_or_else(|| upstream_request_uri.clone());
@@ -3177,6 +3186,7 @@ impl RsipstackBackend {
                     call.upstream_remote_tag.as_ref(),
                     target_contact,
                     Some(&call.upstream_remote_uri),
+                    Some(&call.upstream_local_uri),
                 )?;
 
                 let _ = self
@@ -3280,6 +3290,7 @@ impl RsipstackBackend {
                     pending.upstream_remote_tag.as_ref(),
                     target_contact,
                     Some(&pending.upstream_dialog_uri),
+                    Some(&pending.upstream_local_uri),
                 )?;
 
                 let _ = self
@@ -3472,6 +3483,7 @@ impl RsipstackBackend {
                     pending.upstream_remote_tag.as_ref(),
                     target_contact,
                     Some(&pending.upstream_dialog_uri),
+                    Some(&pending.upstream_local_uri),
                 )?;
 
                 let _ = self
@@ -3652,6 +3664,7 @@ impl RsipstackBackend {
                     call.upstream_remote_tag.as_ref(),
                     target_contact.as_ref(),
                     Some(&call.upstream_remote_uri),
+                    Some(&call.upstream_local_uri),
                 )?;
 
                 upstream_request
