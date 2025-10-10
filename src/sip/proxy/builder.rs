@@ -155,8 +155,6 @@ impl ProxyHandle {
     fn panic_message(panic: Box<dyn Any + Send + 'static>) -> String {
         if let Ok(msg) = panic.downcast::<String>() {
             *msg
-        } else if let Ok(msg) = panic.downcast::<&'static str>() {
-            (*msg).to_string()
         } else {
             "unknown panic payload".to_string()
         }
