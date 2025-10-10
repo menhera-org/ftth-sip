@@ -2254,11 +2254,7 @@ impl RsipstackBackend {
                     .ok()
                     .and_then(|header| header.typed().ok().map(|typed| typed.uri))
                     .unwrap_or_else(|| pending.upstream_remote_uri.clone());
-                let upstream_local_uri = response
-                    .from_header()
-                    .ok()
-                    .and_then(|header| header.typed().ok().map(|typed| typed.uri))
-                    .unwrap_or_else(|| pending.upstream_local_uri.clone());
+                let upstream_local_uri = pending.upstream_local_uri.clone();
 
                 context.calls.write().await.insert(
                     call_id,
