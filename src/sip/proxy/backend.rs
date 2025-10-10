@@ -1550,13 +1550,13 @@ impl RsipstackBackend {
                     Some(&call.upstream_local_uri),
                 )?;
 
-                if let Some(from_header) = upstream_request
-                    .from_header()
-                    .ok()
-                    .and_then(|header| header.typed().ok())
-                {
-                    call.upstream_local_uri = from_header.uri.clone();
-                }
+                // if let Some(from_header) = upstream_request
+                //     .from_header()
+                //     .ok()
+                //     .and_then(|header| header.typed().ok())
+                // {
+                //     call.upstream_local_uri = from_header.uri.clone();
+                // }
 
                 let mut client_tx = self
                     .start_client_transaction(
@@ -1637,7 +1637,7 @@ impl RsipstackBackend {
                 }
                 if let Some(remote_uri) = tx
                     .original
-                    .to_header()
+                    .from_header()
                     .ok()
                     .and_then(|header| header.typed().ok().map(|typed| typed.uri))
                 {
@@ -2146,12 +2146,12 @@ impl RsipstackBackend {
                             .unwrap_or_else(|| pending.upstream_request_uri.clone());
 
                         let upstream_remote_uri = response
-                            .to_header()
+                            .from_header()
                             .ok()
                             .and_then(|header| header.typed().ok().map(|typed| typed.uri))
                             .unwrap_or_else(|| pending.upstream_remote_uri.clone());
                         let upstream_local_uri = response
-                            .from_header()
+                            .to_header()
                             .ok()
                             .and_then(|header| header.typed().ok().map(|typed| typed.uri))
                             .unwrap_or_else(|| pending.upstream_local_uri.clone());
