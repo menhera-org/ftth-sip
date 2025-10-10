@@ -441,10 +441,13 @@ impl RsipstackBackend {
     }
 
     fn rewrite_uri_with_isub(uri: &mut Uri, rewrite: &InviteIsubRewrite) {
-        if let Some(auth) = uri.auth.as_mut() {
-            if let Some((base, _)) = Self::split_trailing_isub(&auth.user) {
-                auth.user = base;
-            }
+        let Some(auth) = uri.auth.as_mut() else {
+            // No user part; nothing to rewrite and we must not attach isub.
+            return;
+        };
+
+        if let Some((base, _)) = Self::split_trailing_isub(&auth.user) {
+            auth.user = base;
         }
         Self::set_isub_param(uri, &rewrite.isub);
     }
