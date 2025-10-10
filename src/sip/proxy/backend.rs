@@ -1631,7 +1631,10 @@ impl RsipstackBackend {
                 if let Some(tag) = Self::extract_upstream_from_tag(&tx.original) {
                     call.upstream_remote_tag = Some(tag);
                 }
-                call.upstream_dialog_uri = tx.original.from_header().cloned().ok().map(|h| h.uri().ok()).flatten().unwrap_or(tx.original.uri.clone());
+                let dialog_uri_cand = tx.original.from_header().cloned().ok().map(|h| h.uri().ok()).flatten();
+                if let Some(uri) = dialog_uri_cand {
+                    call.upstream_dialog_uri = uri;
+                }
                 if let Some(contact) = tx
                     .original
                     .contact_header()
