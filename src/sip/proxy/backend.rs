@@ -641,18 +641,24 @@ impl RsipstackBackend {
         }
         request.uri = request_uri;
 
-        let contact_ip = if upstream_config.bind.address.is_unspecified() {
-            via_ip
+        let mut contact_uri = if let Some(contact) = target_contact {
+            let mut base_uri = contact.clone();
+            if let Some(auth) = base_uri.auth.as_mut() {
+                if auth.user.trim().is_empty() {
+                    *auth = UriAuth::from((identity, Option::<String>::None));
+                }
+            } else {
+                base_uri.auth = Some(UriAuth::from((identity, Option::<String>::None)));
+            }
+            base_uri
         } else {
-            upstream_config.bind.address
+            let mut uri = request.uri.clone();
+            uri.host_with_port = host_with_port.clone();
+            uri.auth = Some(UriAuth::from((identity, Option::<String>::None)));
+            uri
         };
-        let contact_port = if upstream_config.bind.port == 0 {
-            upstream_listener.port()
-        } else {
-            upstream_config.bind.port
-        };
-        let identity_contact = format!("sip:{}@{}:{}", identity, contact_ip, contact_port);
-        let contact_uri = Uri::try_from(identity_contact.as_str()).map_err(Error::sip_stack)?;
+        contact_uri.scheme = Some(Scheme::Sip);
+
         let contact_header = Contact::from(format!("<{}>", contact_uri));
         request
             .headers
