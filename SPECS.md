@@ -27,7 +27,9 @@ The user of this library configures the following (non exhaustive):
 ### Downstream client
 - Downstream client needs to REGISTER itself to our proxy.
 - We remember that client's contact as the downstream.
+- We honor the `Expires` header sent by the client (including `0` clears).
 - Authentication is optional (not usually used).
+  - When auth is configured, 
 - Registration interval is arbitrary, with a minimum of 30 seconds. We follow that timer to track registration states.
 - `Contact` values' userinfo parts are arbitrary in REGISTERs toward our proxy.
 
@@ -66,7 +68,7 @@ The user of this library configures the following (non exhaustive):
     - Request URI is: `sip:<called party userinfo>[;isub=<isub>]@<configured domain>`.
 - `To:` headers of the INVITEs sent to the trunk mirror the Request URIs of those requests.
 - Remember the tag in `From` header in responses from the trunk. And use that value as `To` headers' tag values we send during that call.
-- `From` value we use for outgoing requests are remembered alongside the tags, and use that for messages we send to the trunk during that call.
+- `From` value we use for outgoing requests are remembered alongside the tags, and use that for messages we send to the trunk during that call. Userinfo parts pf `From` headers need not always match the main number, but can be any valid caller ID.
 - No `rport` parameters are allowed inside `Via` headers. Via headers need to contain: `SIP/2.0/UDP (the trunk interface IP):5060;branch=z9hG4bK(...)`.
 - `Route` header must have the values computed by combining:
     - `Path` header values in `200 OK` trunk responses to REGISTERs we send.
@@ -80,5 +82,7 @@ The user of this library configures the following (non exhaustive):
 - In SDP, `m=audio` line is required and PCMU is mandatory.
 - In SDP, `a=sendrecv` must be set.
 - In SDP, `a=ptime:20` is expected per NTT specs.
-- Almost certainly, symmetric RTP is not permitted.
 - We use `RTP/AVP`.
+- We bind separate socket pairs for the trunk and the client legs, respectively.
+- We always force media relay, and no direct media is allowed (SDP rewritten).
+- Timeout (configurable)
