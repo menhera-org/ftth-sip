@@ -29,7 +29,8 @@ use rsip::message::headers_ext::HeadersExt;
 use rsip::typed;
 use rsip::{
     Method, Param, Response, SipMessage, StatusCode, StatusCodeKind, Uri,
-    host_with_port::{Host, HostWithPort}, transport::Transport,
+    host_with_port::{Host, HostWithPort},
+    transport::Transport,
 };
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
@@ -347,13 +348,15 @@ impl RsipstackBackend {
         config: &crate::config::UpstreamConfig,
         allowed: &HashSet<String>,
     ) -> Option<SelectedIdentity> {
-        if let Some(identity) = Self::preferred_identity_user(request, config).and_then(|identity| {
-            if Self::identity_allowed(&identity.user, allowed) {
-                Some(identity)
-            } else {
-                None
-            }
-        }) {
+        if let Some(identity) =
+            Self::preferred_identity_user(request, config).and_then(|identity| {
+                if Self::identity_allowed(&identity.user, allowed) {
+                    Some(identity)
+                } else {
+                    None
+                }
+            })
+        {
             return Some(identity);
         }
 
@@ -380,7 +383,9 @@ impl RsipstackBackend {
             .unwrap_or(false)
     }
 
-    fn sanitize_downstream_invite(request: &mut rsip::Request) -> Result<Option<InviteIsubRewrite>> {
+    fn sanitize_downstream_invite(
+        request: &mut rsip::Request,
+    ) -> Result<Option<InviteIsubRewrite>> {
         if request.method != Method::Invite {
             return Ok(None);
         }
@@ -418,7 +423,9 @@ impl RsipstackBackend {
         }))
     }
 
-    fn sanitize_called_party(user: &str) -> std::result::Result<(String, String, Option<String>), &'static str> {
+    fn sanitize_called_party(
+        user: &str,
+    ) -> std::result::Result<(String, String, Option<String>), &'static str> {
         let decoded = decode_userinfo(user).ok_or("invalid percent-encoding in user part")?;
         let mut base_chars: Vec<char> = Vec::with_capacity(decoded.len());
         let mut isub_chars: Vec<char> = Vec::new();
@@ -781,8 +788,7 @@ impl RsipstackBackend {
         } else {
             format!("sip:{}@{}", identity_user, upstream_config.sip_domain)
         };
-        let identity_uri =
-            Uri::try_from(identity_uri_string.as_str()).map_err(Error::sip_stack)?;
+        let identity_uri = Uri::try_from(identity_uri_string.as_str()).map_err(Error::sip_stack)?;
 
         let mut typed_to = original
             .to_header()
@@ -1663,7 +1669,9 @@ impl RsipstackBackend {
         if let Some(target_addr) = Self::socket_addr_from_host_with_port(&target.addr) {
             if self.is_local_destination(&target_addr).await {
                 warn!(%target_addr, ?binding, "detected attempt to send to local address; blocking");
-                return Err(Error::configuration("refusing to send SIP message to local address"));
+                return Err(Error::configuration(
+                    "refusing to send SIP message to local address",
+                ));
             }
         }
         if matches!(binding, ClientTarget::Downstream) {
@@ -3292,9 +3300,8 @@ impl RsipstackBackend {
 
                 let task_upstream_local_tag = upstream_local_tag.clone();
                 let task_upstream_remote_tag = upstream_remote_tag.clone();
-                let task_upstream_local_user = to_user
-                    .clone()
-                    .unwrap_or_else(|| identity_user.clone());
+                let task_upstream_local_user =
+                    to_user.clone().unwrap_or_else(|| identity_user.clone());
 
                 let downstream_contact_clone = downstream_contact.clone();
                 let call_template = CallContext {

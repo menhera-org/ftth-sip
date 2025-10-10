@@ -15,7 +15,9 @@ use crate::error::{Error, Result};
 use tracing::{debug, info, warn};
 
 use super::state::SipContext;
-use super::utils::{canonicalize_identity, format_socket_for_sip, generate_cnonce, md5_hex, strip_rport_param};
+use super::utils::{
+    canonicalize_identity, format_socket_for_sip, generate_cnonce, md5_hex, strip_rport_param,
+};
 use rsip::common::uri::UriWithParams;
 use rsip::common::uri::param::Tag;
 use rsip::headers::auth::{self, AuthQop, Qop};
@@ -307,9 +309,9 @@ impl UpstreamRegistrar {
                 contact_uri
             ))));
 
-        request.headers.unique_push(rsip::Header::Expires(
-            rsip::headers::Expires::from(3600u32),
-        ));
+        request
+            .headers
+            .unique_push(rsip::Header::Expires(rsip::headers::Expires::from(3600u32)));
 
         if include_authorization && self.context.config.upstream.auth.is_none() {
             return Err(Error::configuration(
@@ -373,7 +375,10 @@ impl UpstreamRegistrar {
         }
 
         if added {
-            debug!(count = guard.len(), "updated associated identities from trunk");
+            debug!(
+                count = guard.len(),
+                "updated associated identities from trunk"
+            );
         }
     }
 
@@ -385,19 +390,18 @@ impl UpstreamRegistrar {
                 if trimmed.is_empty() {
                     return None;
                 }
-                let inner = if let (Some(start), Some(end)) = (trimmed.find('<'), trimmed.rfind('>')) {
-                    if start + 1 >= end {
-                        return None;
-                    }
-                    trimmed[start + 1..end].trim()
-                } else {
-                    trimmed
-                };
+                let inner =
+                    if let (Some(start), Some(end)) = (trimmed.find('<'), trimmed.rfind('>')) {
+                        if start + 1 >= end {
+                            return None;
+                        }
+                        trimmed[start + 1..end].trim()
+                    } else {
+                        trimmed
+                    };
 
                 match Uri::try_from(inner) {
-                    Ok(uri) => uri
-                        .auth
-                        .and_then(|auth| canonicalize_identity(&auth.user)),
+                    Ok(uri) => uri.auth.and_then(|auth| canonicalize_identity(&auth.user)),
                     Err(_) => None,
                 }
             })

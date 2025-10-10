@@ -10,8 +10,8 @@ use crate::media::MediaRelayBuilder;
 
 use super::backend::{RsipstackBackend, SipBackend};
 use super::state::{DownstreamAuthState, ListenerSockets, SipContext};
-use crate::sip::registration::RegistrationCache;
 use super::utils::canonicalize_identity;
+use crate::sip::registration::RegistrationCache;
 
 pub struct FtthSipProxyBuilder<B = RsipstackBackend> {
     config: crate::config::ProxyConfig,
