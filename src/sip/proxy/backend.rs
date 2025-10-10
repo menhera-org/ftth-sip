@@ -506,7 +506,7 @@ impl RsipstackBackend {
         upstream_local_tag: &Tag,
         upstream_remote_tag: Option<&Tag>,
         target_contact: Option<&Uri>,
-        dialog_uri: Option<&Uri>,
+        remote_from_uri: Option<&Uri>,
         local_from_uri: Option<&Uri>,
     ) -> Result<rsip::Request> {
         let mut request = original.clone();
@@ -588,7 +588,7 @@ impl RsipstackBackend {
             .and_then(|header| header.typed().ok());
         if let Some(to_header) = typed_to.as_mut() {
             to_header.uri.host_with_port = to_host_with_port.clone();
-            if let Some(dialog_uri) = dialog_uri {
+            if let Some(dialog_uri) = remote_from_uri {
                 to_header.uri.auth = dialog_uri.auth.clone();
                 to_header.uri.params = dialog_uri.params.clone();
             }
@@ -603,21 +603,7 @@ impl RsipstackBackend {
             }
         }
 
-        let mut typed_from = if request.method == Method::Invite {
-            if let Some(to_header) = typed_to.as_ref() {
-                typed::From {
-                    display_name: to_header.display_name.clone(),
-                    uri: to_header.uri.clone(),
-                    params: to_header.params.clone(),
-                }
-            } else {
-                typed::From {
-                    display_name: None,
-                    uri: request.uri.clone(),
-                    params: Vec::new(),
-                }
-            }
-        } else if let Some(local_uri) = local_from_uri {
+        let mut typed_from = if let Some(local_uri) = local_from_uri {
             typed::From {
                 display_name: None,
                 uri: local_uri.clone(),
@@ -650,7 +636,9 @@ impl RsipstackBackend {
             contact.clone()
         } else {
             let mut uri = request.uri.clone();
-            if let Some(dialog_uri) = dialog_uri {
+
+            // Is this correct?
+            if let Some(dialog_uri) = remote_from_uri {
                 uri.auth = dialog_uri.auth.clone();
                 uri.params = dialog_uri.params.clone();
             }
