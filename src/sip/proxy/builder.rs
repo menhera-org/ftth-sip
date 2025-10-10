@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::sync::watch;
@@ -11,6 +12,7 @@ use crate::media::MediaRelayBuilder;
 use super::backend::{RsipstackBackend, SipBackend};
 use super::state::{DownstreamAuthState, ListenerSockets, SipContext};
 use crate::sip::registration::RegistrationCache;
+use super::utils::{canonicalize_identity, md5_hex};
 
 pub struct FtthSipProxyBuilder<B = RsipstackBackend> {
     config: crate::config::ProxyConfig,
@@ -37,6 +39,27 @@ where
 
     pub async fn build(self) -> Result<ProxyRuntime<B>> {
         let media = MediaRelayBuilder::from_config(&self.config.media)?.build();
+        let mut allowed_identities: HashSet<String> = HashSet::new();
+        if !self.config.upstream.default_identity.is_empty() {
+            if let Some(canonical) = canonicalize_identity(&self.config.upstream.default_identity) {
+                allowed_identities.insert(canonical);
+            }
+        }
+        for identity in &self.config.upstream.allowed_identities {
+            if let Some(canonical) = canonicalize_identity(identity) {
+                allowed_identities.insert(canonical);
+            }
+        }
+        let contact_seed = format!(
+            "{}:{}:{:?}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            std::thread::current().id()
+        );
+        let upstream_contact_user = format!("ct{}", md5_hex(contact_seed.as_bytes()));
         let context = SipContext {
             config: Arc::new(self.config),
             media: Arc::new(media),
@@ -44,6 +67,8 @@ where
             sockets: Arc::new(ListenerSockets::default()),
             calls: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             route_set: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            allowed_identities: Arc::new(tokio::sync::RwLock::new(allowed_identities)),
+            upstream_contact_user: Arc::new(upstream_contact_user),
             auth: Arc::new(DownstreamAuthState::new()),
             pending: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         };

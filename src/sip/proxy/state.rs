@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,6 +26,8 @@ pub struct SipContext {
     pub sockets: Arc<ListenerSockets>,
     pub calls: Arc<RwLock<HashMap<String, CallContext>>>,
     pub route_set: Arc<RwLock<Vec<rsip::common::uri::UriWithParams>>>,
+    pub allowed_identities: Arc<RwLock<HashSet<String>>>,
+    pub upstream_contact_user: Arc<String>,
     pub(super) auth: Arc<DownstreamAuthState>,
     pub(super) pending: Arc<RwLock<HashMap<String, PendingInvite>>>,
 }

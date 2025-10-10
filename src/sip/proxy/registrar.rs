@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use tracing::{debug, info, warn};
 
 use super::state::SipContext;
-use super::utils::{format_socket_for_sip, generate_cnonce, md5_hex, strip_rport_param};
+use super::utils::{canonicalize_identity, format_socket_for_sip, generate_cnonce, md5_hex, strip_rport_param};
 use rsip::common::uri::UriWithParams;
 use rsip::common::uri::param::Tag;
 use rsip::headers::auth::{self, AuthQop, Qop};
@@ -123,7 +123,7 @@ impl UpstreamRegistrar {
     }
 
     async fn register_once(self: &Arc<Self>) -> Result<Duration> {
-        let expires_hint = self.context.config.timers.registration_refresh_secs;
+        let expires_hint = 3600u64;
         let mut needs_auth_retry = self.challenge.read().await.is_some();
         let mut attempts = 0u8;
 
@@ -144,6 +144,7 @@ impl UpstreamRegistrar {
                     match response.status_code {
                         StatusCode::OK => {
                             self.update_route_set_from_response(&response).await;
+                            self.update_associated_identities(&response).await;
                             let refresh = self.schedule_from_response(&response, expires_hint)?;
                             self.nonce_count.store(0, Ordering::SeqCst);
                             return Ok(refresh);
@@ -219,7 +220,7 @@ impl UpstreamRegistrar {
 
     async fn prepare_register_request(
         self: &Arc<Self>,
-        expires_hint: u64,
+        _expires_hint: u64,
         include_authorization: bool,
     ) -> Result<rsip::Request> {
         let config = &self.context.config.upstream;
@@ -240,7 +241,8 @@ impl UpstreamRegistrar {
         };
 
         let address_literal = format_socket_for_sip(&local_socket);
-        let contact_uri = format!("sip:{}@{}", identity, address_literal);
+        let contact_user = self.context.upstream_contact_user.as_ref().clone();
+        let contact_uri = format!("sip:{}@{}", contact_user, address_literal);
 
         #[allow(unused_mut)]
         let mut request = rsip::Request {
@@ -306,11 +308,9 @@ impl UpstreamRegistrar {
                 contact_uri
             ))));
 
-        request
-            .headers
-            .unique_push(rsip::Header::Expires(rsip::headers::Expires::from(
-                expires_hint as u32,
-            )));
+        request.headers.unique_push(rsip::Header::Expires(
+            rsip::headers::Expires::from(3600u32),
+        ));
 
         if include_authorization && self.context.config.upstream.auth.is_none() {
             return Err(Error::configuration(
@@ -349,6 +349,60 @@ impl UpstreamRegistrar {
         let routes = Self::extract_route_set(response);
         let mut guard = self.context.route_set.write().await;
         *guard = routes;
+    }
+
+    async fn update_associated_identities(&self, response: &rsip::Response) {
+        let mut collected = Vec::new();
+        for header in response.headers.iter() {
+            if let rsip::Header::Other(name, value) = header {
+                if name.eq_ignore_ascii_case("P-Associated-URI") {
+                    collected.extend(Self::extract_associated_users(value));
+                }
+            }
+        }
+
+        if collected.is_empty() {
+            return;
+        }
+
+        let mut guard = self.context.allowed_identities.write().await;
+        let mut added = false;
+        for user in collected {
+            if guard.insert(user.clone()) {
+                added = true;
+            }
+        }
+
+        if added {
+            debug!(count = guard.len(), "updated associated identities from trunk");
+        }
+    }
+
+    fn extract_associated_users(value: &str) -> Vec<String> {
+        value
+            .split(',')
+            .filter_map(|entry| {
+                let trimmed = entry.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                let inner = if let (Some(start), Some(end)) = (trimmed.find('<'), trimmed.rfind('>')) {
+                    if start + 1 >= end {
+                        return None;
+                    }
+                    trimmed[start + 1..end].trim()
+                } else {
+                    trimmed
+                };
+
+                match Uri::try_from(inner) {
+                    Ok(uri) => uri
+                        .auth
+                        .and_then(|auth| canonicalize_identity(&auth.user)),
+                    Err(_) => None,
+                }
+            })
+            .collect()
     }
 
     fn extract_route_set(response: &rsip::Response) -> Vec<UriWithParams> {
