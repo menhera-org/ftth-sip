@@ -40,9 +40,10 @@ where
         let media = MediaRelayBuilder::from_config(&self.config.media)?.build();
         let mut allowed_identities: HashSet<String> = HashSet::new();
         if !self.config.upstream.default_identity.is_empty()
-            && let Some(canonical) = canonicalize_identity(&self.config.upstream.default_identity) {
-                allowed_identities.insert(canonical);
-            }
+            && let Some(canonical) = canonicalize_identity(&self.config.upstream.default_identity)
+        {
+            allowed_identities.insert(canonical);
+        }
         for identity in &self.config.upstream.allowed_identities {
             if let Some(canonical) = canonicalize_identity(identity) {
                 allowed_identities.insert(canonical);

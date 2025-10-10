@@ -526,23 +526,24 @@ fn rewrite_sdp(body: &str, new_ip: IpAddr, new_port: u16, force_pcmu: bool) -> R
 
             if let (Some(username), Some(sess_id), Some(sess_version), Some(network)) =
                 (username, sess_id, sess_version, network)
-                && network.eq_ignore_ascii_case("IN") {
-                    let addrtype = match new_ip {
-                        IpAddr::V4(_) => "IP4",
-                        IpAddr::V6(_) => "IP6",
-                    };
-                    let address = new_ip.to_string();
-                    let mut rewritten_line = format!(
-                        "o={} {} {} IN {} {}",
-                        username, sess_id, sess_version, addrtype, address
-                    );
-                    if !tail.is_empty() {
-                        rewritten_line.push(' ');
-                        rewritten_line.push_str(&tail.join(" "));
-                    }
-                    rewritten.push(rewritten_line);
-                    continue;
+                && network.eq_ignore_ascii_case("IN")
+            {
+                let addrtype = match new_ip {
+                    IpAddr::V4(_) => "IP4",
+                    IpAddr::V6(_) => "IP6",
+                };
+                let address = new_ip.to_string();
+                let mut rewritten_line = format!(
+                    "o={} {} {} IN {} {}",
+                    username, sess_id, sess_version, addrtype, address
+                );
+                if !tail.is_empty() {
+                    rewritten_line.push(' ');
+                    rewritten_line.push_str(&tail.join(" "));
                 }
+                rewritten.push(rewritten_line);
+                continue;
+            }
 
             rewritten.push(line.to_string());
             continue;

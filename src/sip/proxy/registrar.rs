@@ -320,11 +320,12 @@ impl UpstreamRegistrar {
         }
 
         if include_authorization
-            && let Some(authorization) = self.build_authorization(&request).await? {
-                request
-                    .headers
-                    .unique_push(rsip::Header::Authorization(authorization.into()));
-            }
+            && let Some(authorization) = self.build_authorization(&request).await?
+        {
+            request
+                .headers
+                .unique_push(rsip::Header::Authorization(authorization.into()));
+        }
 
         request.headers.unique_push(rsip::Header::ContentLength(
             rsip::headers::ContentLength::from(0u32),
@@ -355,9 +356,10 @@ impl UpstreamRegistrar {
         let mut collected = Vec::new();
         for header in response.headers.iter() {
             if let rsip::Header::Other(name, value) = header
-                && name.eq_ignore_ascii_case("P-Associated-URI") {
-                    collected.extend(Self::extract_associated_users(value));
-                }
+                && name.eq_ignore_ascii_case("P-Associated-URI")
+            {
+                collected.extend(Self::extract_associated_users(value));
+            }
         }
 
         if collected.is_empty() {
@@ -433,21 +435,23 @@ impl UpstreamRegistrar {
     async fn store_challenge(&self, challenge: &rsip::typed::WwwAuthenticate) -> Result<()> {
         let algorithm_value = challenge.algorithm;
         if let Some(algorithm) = algorithm_value
-            && !matches!(algorithm, auth::Algorithm::Md5 | auth::Algorithm::Md5Sess) {
-                return Err(Error::configuration(format!(
-                    "unsupported digest algorithm {:?}",
-                    algorithm
-                )));
-            }
+            && !matches!(algorithm, auth::Algorithm::Md5 | auth::Algorithm::Md5Sess)
+        {
+            return Err(Error::configuration(format!(
+                "unsupported digest algorithm {:?}",
+                algorithm
+            )));
+        }
 
         let qop_value = challenge.qop.clone();
         if let Some(qop) = qop_value.as_ref()
-            && !matches!(qop, Qop::Auth) {
-                return Err(Error::configuration(format!(
-                    "unsupported digest qop {:?}",
-                    qop
-                )));
-            }
+            && !matches!(qop, Qop::Auth)
+        {
+            return Err(Error::configuration(format!(
+                "unsupported digest qop {:?}",
+                qop
+            )));
+        }
 
         let digest = DigestChallenge {
             realm: challenge.realm.clone(),
