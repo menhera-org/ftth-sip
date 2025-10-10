@@ -665,7 +665,7 @@ impl RsipstackBackend {
             upstream_config.bind.port
         };
         let contact_uri =
-            Uri::try_from(format!("sip:{}@{}:{}", identity, contact_ip, contact_port).as_str())
+            Uri::try_from(format!("sip:{}:{}", contact_ip, contact_port).as_str())
                 .map_err(Error::sip_stack)?;
 
         let contact_header = Contact::from(format!("<{}>", contact_uri));
@@ -1631,7 +1631,7 @@ impl RsipstackBackend {
                 if let Some(tag) = Self::extract_upstream_from_tag(&tx.original) {
                     call.upstream_remote_tag = Some(tag);
                 }
-                call.upstream_dialog_uri = tx.original.uri.clone();
+                call.upstream_dialog_uri = tx.original.to_header().cloned().ok().map(|h| h.uri().ok()).flatten().unwrap_or(tx.original.uri.clone());
                 if let Some(contact) = tx
                     .original
                     .contact_header()
