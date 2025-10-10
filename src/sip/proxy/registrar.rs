@@ -319,13 +319,12 @@ impl UpstreamRegistrar {
             ));
         }
 
-        if include_authorization {
-            if let Some(authorization) = self.build_authorization(&request).await? {
+        if include_authorization
+            && let Some(authorization) = self.build_authorization(&request).await? {
                 request
                     .headers
                     .unique_push(rsip::Header::Authorization(authorization.into()));
             }
-        }
 
         request.headers.unique_push(rsip::Header::ContentLength(
             rsip::headers::ContentLength::from(0u32),
@@ -341,7 +340,7 @@ impl UpstreamRegistrar {
             .unwrap_or(fallback);
 
         // NTT NGN requires re-REGISTER after 40% of the reported expires interval.
-        let refresh_secs = expires.checked_mul(2).unwrap_or(u64::MAX) / 5;
+        let refresh_secs = expires.saturating_mul(2) / 5;
 
         Ok(Duration::from_secs(refresh_secs.max(60)))
     }
@@ -355,11 +354,10 @@ impl UpstreamRegistrar {
     async fn update_associated_identities(&self, response: &rsip::Response) {
         let mut collected = Vec::new();
         for header in response.headers.iter() {
-            if let rsip::Header::Other(name, value) = header {
-                if name.eq_ignore_ascii_case("P-Associated-URI") {
+            if let rsip::Header::Other(name, value) = header
+                && name.eq_ignore_ascii_case("P-Associated-URI") {
                     collected.extend(Self::extract_associated_users(value));
                 }
-            }
         }
 
         if collected.is_empty() {
@@ -434,24 +432,22 @@ impl UpstreamRegistrar {
 
     async fn store_challenge(&self, challenge: &rsip::typed::WwwAuthenticate) -> Result<()> {
         let algorithm_value = challenge.algorithm;
-        if let Some(algorithm) = algorithm_value {
-            if !matches!(algorithm, auth::Algorithm::Md5 | auth::Algorithm::Md5Sess) {
+        if let Some(algorithm) = algorithm_value
+            && !matches!(algorithm, auth::Algorithm::Md5 | auth::Algorithm::Md5Sess) {
                 return Err(Error::configuration(format!(
                     "unsupported digest algorithm {:?}",
                     algorithm
                 )));
             }
-        }
 
         let qop_value = challenge.qop.clone();
-        if let Some(qop) = qop_value.as_ref() {
-            if !matches!(qop, Qop::Auth) {
+        if let Some(qop) = qop_value.as_ref()
+            && !matches!(qop, Qop::Auth) {
                 return Err(Error::configuration(format!(
                     "unsupported digest qop {:?}",
                     qop
                 )));
             }
-        }
 
         let digest = DigestChallenge {
             realm: challenge.realm.clone(),

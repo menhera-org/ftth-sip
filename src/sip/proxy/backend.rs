@@ -400,8 +400,8 @@ impl RsipstackBackend {
             Self::sanitize_called_party(&auth.user).map_err(Error::sip_stack)?;
         auth.user = encoded_user.clone();
 
-        if let Ok(to_header) = request.to_header() {
-            if let Ok(mut typed_to) = to_header.typed() {
+        if let Ok(to_header) = request.to_header()
+            && let Ok(mut typed_to) = to_header.typed() {
                 if let Some(to_auth) = typed_to.uri.auth.as_mut() {
                     to_auth.user = encoded_user.clone();
                 }
@@ -415,7 +415,6 @@ impl RsipstackBackend {
                     .retain(|header| !matches!(header, rsip::Header::To(_)));
                 request.headers.push(rsip::Header::To(typed_to.into()));
             }
-        }
 
         Ok(isub.map(|value| InviteIsubRewrite {
             base_user: canonical_user,
@@ -1046,13 +1045,12 @@ impl RsipstackBackend {
             return Err(Error::configuration("unsupported downstream auth scheme"));
         }
 
-        if let Some(algorithm) = authorization.algorithm {
-            if algorithm != auth::Algorithm::Md5 {
+        if let Some(algorithm) = authorization.algorithm
+            && algorithm != auth::Algorithm::Md5 {
                 return Err(Error::configuration(
                     "unsupported downstream digest algorithm",
                 ));
             }
-        }
 
         let method = request.method.to_string();
         let uri = authorization.uri.to_string();
@@ -1186,17 +1184,16 @@ impl RsipstackBackend {
             return Ok(false);
         }
 
-        if let Some(user) = username {
-            if !auth.username.eq_ignore_ascii_case(user) {
+        if let Some(user) = username
+            && !auth.username.eq_ignore_ascii_case(user) {
                 warn!(expected = %user, received = %auth.username, "downstream username mismatch");
                 self.challenge_downstream_register(context, tx, realm, false)
                     .await?;
                 return Ok(false);
             }
-        }
 
-        if let Some(algorithm) = auth.algorithm {
-            if algorithm != auth::Algorithm::Md5 {
+        if let Some(algorithm) = auth.algorithm
+            && algorithm != auth::Algorithm::Md5 {
                 warn!(?algorithm, "unsupported digest algorithm");
                 if proxy {
                     self.challenge_downstream_proxy(context, tx, realm, false)
@@ -1207,7 +1204,6 @@ impl RsipstackBackend {
                 }
                 return Ok(false);
             }
-        }
 
         if !context.auth.is_valid(&auth.nonce).await {
             warn!(nonce = %auth.nonce, proxy, "nonce invalid or expired");
@@ -1261,11 +1257,10 @@ impl RsipstackBackend {
 
         let mut collected: Vec<rsip::Header> = mem::take(headers).into();
         for header in collected.iter_mut() {
-            if let rsip::Header::Other(name, value) = header {
-                if let Some(expanded) = Self::expand_compact_header(name, value) {
+            if let rsip::Header::Other(name, value) = header
+                && let Some(expanded) = Self::expand_compact_header(name, value) {
                     *header = expanded;
                 }
-            }
         }
         *headers = collected.into();
     }
@@ -1386,14 +1381,14 @@ impl RsipstackBackend {
         let fallback_isub = if is_invite {
             fallback_p_called_party
                 .as_ref()
-                .and_then(|uri| Self::find_isub_param(uri))
+                .and_then(Self::find_isub_param)
         } else {
             None
         };
         let p_called_party_isub = if is_invite {
             p_called_party_uri
                 .as_ref()
-                .and_then(|uri| Self::find_isub_param(uri))
+                .and_then(Self::find_isub_param)
         } else {
             None
         };
@@ -1479,32 +1474,27 @@ impl RsipstackBackend {
             uri.host_with_port = call.downstream_target.addr.clone();
             uri
         };
-        if strip_user {
-            if let Some(user) = target_user.as_ref() {
+        if strip_user
+            && let Some(user) = target_user.as_ref() {
                 target_uri.auth = Some(UriAuth::from((user.as_str(), Option::<String>::None)));
             }
-        }
 
-        if is_invite {
-            if let Some(isub) = invite_isub.as_ref() {
+        if is_invite
+            && let Some(isub) = invite_isub.as_ref() {
                 Self::set_isub_param(&mut target_uri, isub);
             }
-        }
         request.uri = target_uri;
 
-        if is_invite {
-            if let Some(isub) = invite_isub.as_ref() {
-                if let Ok(header_to) = request.to_header() {
-                    if let Ok(mut typed_to) = header_to.typed() {
+        if is_invite
+            && let Some(isub) = invite_isub.as_ref()
+                && let Ok(header_to) = request.to_header()
+                    && let Ok(mut typed_to) = header_to.typed() {
                         Self::set_isub_param(&mut typed_to.uri, isub);
                         request
                             .headers
                             .retain(|header| !matches!(header, rsip::Header::To(_)));
                         request.headers.push(rsip::Header::To(typed_to.into()));
                     }
-                }
-            }
-        }
 
         let original_uri_string = original_uri.to_string();
         let has_original_uri_header = request.headers.iter().any(|header| match header {
@@ -1522,17 +1512,16 @@ impl RsipstackBackend {
             rsip::Header::Other(name, _) => name.eq_ignore_ascii_case("P-Called-Party-ID"),
             _ => false,
         });
-        if !has_p_called_party {
-            if let Some(uri) = fallback_p_called_party.as_ref() {
+        if !has_p_called_party
+            && let Some(uri) = fallback_p_called_party.as_ref() {
                 request.headers.push(rsip::Header::Other(
                     "P-Called-Party-ID".into(),
                     format!("<{}>", uri),
                 ));
             }
-        }
 
         let contact_user = if strip_user {
-            target_user.as_deref().unwrap_or_else(|| {
+            target_user.as_deref().unwrap_or({
                 if call.identity.is_empty() {
                     "proxy"
                 } else {
@@ -1560,8 +1549,8 @@ impl RsipstackBackend {
                 ))));
         }
 
-        if let Some(local_tag) = call.downstream_local_tag.as_ref() {
-            if let Some(mut typed_to) = request
+        if let Some(local_tag) = call.downstream_local_tag.as_ref()
+            && let Some(mut typed_to) = request
                 .to_header()
                 .ok()
                 .and_then(|header| header.typed().ok())
@@ -1575,7 +1564,6 @@ impl RsipstackBackend {
                     .retain(|header| !matches!(header, rsip::Header::To(_)));
                 request.headers.push(rsip::Header::To(typed_to.into()));
             }
-        }
 
         let mut via_addr: SipAddr = downstream_listener.into();
         via_addr.r#type = Some(Transport::Udp);
@@ -1666,14 +1654,13 @@ impl RsipstackBackend {
         target: SipAddr,
         binding: ClientTarget,
     ) -> Result<Transaction> {
-        if let Some(target_addr) = Self::socket_addr_from_host_with_port(&target.addr) {
-            if self.is_local_destination(&target_addr).await {
+        if let Some(target_addr) = Self::socket_addr_from_host_with_port(&target.addr)
+            && self.is_local_destination(&target_addr).await {
                 warn!(%target_addr, ?binding, "detected attempt to send to local address; blocking");
                 return Err(Error::configuration(
                     "refusing to send SIP message to local address",
                 ));
             }
-        }
         if matches!(binding, ClientTarget::Downstream) {
             request.headers.retain(|header| {
                 !matches!(
@@ -1777,8 +1764,7 @@ impl RsipstackBackend {
 
                 let upstream_listener = {
                     let guard = context.sockets.upstream.lock().await;
-                    guard
-                        .clone()
+                    (*guard)
                         .unwrap_or_else(|| context.config.upstream.bind.socket_addr())
                 };
 
@@ -1813,7 +1799,7 @@ impl RsipstackBackend {
                     call.identity.as_str(),
                     call.identity_isub.as_deref(),
                     &route_set,
-                    &*allowed_guard,
+                    &allowed_guard,
                     invite_isub.as_ref(),
                     &call.upstream_local_tag,
                     call.upstream_remote_tag.as_ref(),
@@ -1848,8 +1834,8 @@ impl RsipstackBackend {
                             Self::expand_compact_headers(&mut response.headers);
                             let status = response.status_code.clone();
 
-                            if !response.body.is_empty() {
-                                if let Ok(body) = String::from_utf8(response.body.clone()) {
+                            if !response.body.is_empty()
+                                && let Ok(body) = String::from_utf8(response.body.clone()) {
                                     let rewrite = call.media.rewrite_for_downstream(&body)?;
                                     call.media
                                         .set_upstream_endpoints(
@@ -1863,7 +1849,6 @@ impl RsipstackBackend {
                                         rsip::headers::ContentLength::from(len),
                                     ));
                                 }
-                            }
 
                             if let Some(contact) = response
                                 .contact_header()
@@ -1947,8 +1932,7 @@ impl RsipstackBackend {
 
                 let downstream_listener = {
                     let guard = context.sockets.downstream.lock().await;
-                    guard
-                        .clone()
+                    (*guard)
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
                 let default_user = context.config.downstream.default_user.as_deref();
@@ -1983,8 +1967,8 @@ impl RsipstackBackend {
                             Self::expand_compact_headers(&mut response.headers);
                             let status = response.status_code.clone();
 
-                            if !response.body.is_empty() {
-                                if let Ok(body) = String::from_utf8(response.body.clone()) {
+                            if !response.body.is_empty()
+                                && let Ok(body) = String::from_utf8(response.body.clone()) {
                                     let rewrite = call.media.rewrite_for_upstream(&body)?;
                                     call.media
                                         .set_downstream_endpoints(
@@ -1998,7 +1982,6 @@ impl RsipstackBackend {
                                         rsip::headers::ContentLength::from(len),
                                     ));
                                 }
-                            }
 
                             if let Some(contact) = response
                                 .contact_header()
@@ -2167,11 +2150,10 @@ impl RsipstackBackend {
                                     {
                                         pending.upstream_local_uri = raw_from_uri;
                                     }
-                                    if matches!(status_kind, StatusCodeKind::Successful) {
-                                        if let Some(contact) = raw_contact.clone() {
+                                    if matches!(status_kind, StatusCodeKind::Successful)
+                                        && let Some(contact) = raw_contact.clone() {
                                             pending.upstream_request_uri = contact;
                                         }
-                                    }
                                 }
                             }
 
@@ -2189,8 +2171,8 @@ impl RsipstackBackend {
                                     .clone()
                             };
                             Self::replace_top_via(&mut upstream_response.headers, downstream_via);
-                            if !upstream_response.body.is_empty() {
-                                if let Ok(body) = String::from_utf8(upstream_response.body.clone()) {
+                            if !upstream_response.body.is_empty()
+                                && let Ok(body) = String::from_utf8(upstream_response.body.clone()) {
                                     let rewrite = media_session.rewrite_for_downstream(&body)?;
                                     media_session
                                         .set_upstream_endpoints(
@@ -2206,7 +2188,6 @@ impl RsipstackBackend {
                                             rsip::headers::ContentLength::from(len),
                                         ));
                                 }
-                            }
 
                             {
                                 let mut guard = downstream_tx.lock().await;
@@ -2316,8 +2297,8 @@ impl RsipstackBackend {
                                     .push(rsip::Header::To(typed_to.into()));
                             }
 
-                            if let Some(tag) = upstream_remote_tag.as_ref() {
-                                if let Some(mut typed_from) = downstream_response
+                            if let Some(tag) = upstream_remote_tag.as_ref()
+                                && let Some(mut typed_from) = downstream_response
                                     .from_header()
                                     .ok()
                                     .and_then(|header| header.typed().ok())
@@ -2333,10 +2314,9 @@ impl RsipstackBackend {
                                         .headers
                                         .push(rsip::Header::From(typed_from.into()));
                                 }
-                            }
 
-                            if !downstream_response.body.is_empty() {
-                                if let Ok(body) = String::from_utf8(downstream_response.body.clone()) {
+                            if !downstream_response.body.is_empty()
+                                && let Ok(body) = String::from_utf8(downstream_response.body.clone()) {
                                     let rewrite = media_session.rewrite_for_upstream(&body)?;
                                     media_session
                                         .set_downstream_endpoints(
@@ -2352,7 +2332,6 @@ impl RsipstackBackend {
                                             rsip::headers::ContentLength::from(len),
                                         ));
                                 }
-                            }
 
                             {
                                 let mut guard = upstream_tx.lock().await;
@@ -2643,7 +2622,7 @@ impl RsipstackBackend {
 
         Self::expand_compact_headers(&mut tx.original.headers);
 
-        match tx.original.method.clone() {
+        match tx.original.method {
             Method::Invite => self.handle_invite(context, tx, direction).await,
             Method::Register => self.handle_register(context, &mut tx, direction).await,
             Method::Options => self.handle_options(context, &mut tx, direction).await,
@@ -2839,13 +2818,12 @@ impl RsipstackBackend {
             "application/sdp".into(),
         ));
 
-        if direction == TransactionDirection::Downstream {
-            if let Some(registration) = context.registrations.read().await.get() {
+        if direction == TransactionDirection::Downstream
+            && let Some(registration) = context.registrations.read().await.get() {
                 headers.push(rsip::Header::Contact(Contact::from(
                     registration.contact.to_string(),
                 )));
             }
-        }
 
         tx.reply_with(StatusCode::OK, headers, None)
             .await
@@ -2912,7 +2890,7 @@ impl RsipstackBackend {
                 let selected_identity = match Self::select_identity(
                     &tx.original,
                     &context.config.upstream,
-                    &*allowed_guard,
+                    &allowed_guard,
                 ) {
                     Some(identity) => identity,
                     None => {
@@ -2928,14 +2906,13 @@ impl RsipstackBackend {
                 let identity_isub = selected_identity.isub.clone();
 
                 let invite_isub = Self::detect_invite_isub(&tx.original.uri);
-                if let Some(rewrite) = invite_isub.as_ref() {
-                    if rewrite.base_user.is_empty() {
+                if let Some(rewrite) = invite_isub.as_ref()
+                    && rewrite.base_user.is_empty() {
                         tx.reply(StatusCode::NotFound)
                             .await
                             .map_err(Error::sip_stack)?;
                         return Ok(());
                     }
-                }
 
                 let registration_source = {
                     let guard = context.registrations.read().await;
@@ -3012,8 +2989,7 @@ impl RsipstackBackend {
 
                 let upstream_listener = {
                     let guard = context.sockets.upstream.lock().await;
-                    guard
-                        .clone()
+                    (*guard)
                         .unwrap_or_else(|| context.config.upstream.bind.socket_addr())
                 };
 
@@ -3030,7 +3006,7 @@ impl RsipstackBackend {
                     identity_user.as_str(),
                     identity_isub.as_deref(),
                     &route_set,
-                    &*allowed_guard,
+                    &allowed_guard,
                     invite_isub.as_ref(),
                     &upstream_local_tag,
                     None,
@@ -3195,31 +3171,25 @@ impl RsipstackBackend {
                 let allowed_guard = context.allowed_identities.read().await;
                 let mut selected_identity = None;
 
-                if let Some(identity) = request_identity {
-                    if Self::identity_allowed(&identity.user, &*allowed_guard) {
+                if let Some(identity) = request_identity
+                    && Self::identity_allowed(&identity.user, &allowed_guard) {
                         selected_identity = Some(identity);
                     }
-                }
 
-                if selected_identity.is_none() {
-                    if let Some(identity) = to_identity {
-                        if Self::identity_allowed(&identity.user, &*allowed_guard) {
+                if selected_identity.is_none()
+                    && let Some(identity) = to_identity
+                        && Self::identity_allowed(&identity.user, &allowed_guard) {
                             selected_identity = Some(identity);
                         }
-                    }
-                }
 
-                if selected_identity.is_none() && !config.upstream.default_identity.is_empty() {
-                    if let Some(identity) =
+                if selected_identity.is_none() && !config.upstream.default_identity.is_empty()
+                    && let Some(identity) =
                         Self::normalize_identity_user(&config.upstream.default_identity)
-                    {
-                        if Self::identity_allowed(&identity.user, &*allowed_guard)
-                            || allowed_guard.is_empty()
+                        && (Self::identity_allowed(&identity.user, &allowed_guard)
+                            || allowed_guard.is_empty())
                         {
                             selected_identity = Some(identity);
                         }
-                    }
-                }
                 drop(allowed_guard);
 
                 let selected_identity = match selected_identity {
@@ -3238,8 +3208,7 @@ impl RsipstackBackend {
                     .and_then(|typed| typed.uri.auth.as_ref().map(|auth| auth.user.clone()));
                 let downstream_listener = {
                     let guard = context.sockets.downstream.lock().await;
-                    guard
-                        .clone()
+                    (*guard)
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
                 let fallback_p_called_party =
@@ -3462,8 +3431,7 @@ impl RsipstackBackend {
             TransactionDirection::Downstream => {
                 let upstream_listener = {
                     let guard = context.sockets.upstream.lock().await;
-                    guard
-                        .clone()
+                    (*guard)
                         .unwrap_or_else(|| context.config.upstream.bind.socket_addr())
                 };
 
@@ -3473,7 +3441,7 @@ impl RsipstackBackend {
                 let target_contact = call
                     .upstream_contact
                     .as_ref()
-                    .or_else(|| Some(&call.upstream_request_uri));
+                    .or(Some(&call.upstream_request_uri));
                 let upstream_request = Self::prepare_upstream_request(
                     &endpoint,
                     upstream_listener,
@@ -3483,7 +3451,7 @@ impl RsipstackBackend {
                     call.identity.as_str(),
                     call.identity_isub.as_deref(),
                     &route_set,
-                    &*allowed_guard,
+                    &allowed_guard,
                     None,
                     &call.upstream_local_tag,
                     call.upstream_remote_tag.as_ref(),
@@ -3505,8 +3473,7 @@ impl RsipstackBackend {
             TransactionDirection::Upstream => {
                 let downstream_listener = {
                     let guard = context.sockets.downstream.lock().await;
-                    guard
-                        .clone()
+                    (*guard)
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
                 let default_user = context.config.downstream.default_user.as_deref();
@@ -3565,8 +3532,7 @@ impl RsipstackBackend {
 
                 let upstream_listener = {
                     let guard = context.sockets.upstream.lock().await;
-                    guard
-                        .clone()
+                    (*guard)
                         .unwrap_or_else(|| context.config.upstream.bind.socket_addr())
                 };
                 let config = context.config.as_ref();
@@ -3580,7 +3546,7 @@ impl RsipstackBackend {
                     .and_then(|header| header.typed().ok().map(|typed| typed.uri));
                 let target_contact = upstream_contact
                     .as_ref()
-                    .or_else(|| Some(&pending.upstream_request_uri));
+                    .or(Some(&pending.upstream_request_uri));
 
                 let upstream_request = Self::prepare_upstream_request(
                     endpoint.as_ref(),
@@ -3591,7 +3557,7 @@ impl RsipstackBackend {
                     pending.identity.as_str(),
                     pending.identity_isub.as_deref(),
                     &route_set,
-                    &*allowed_guard,
+                    &allowed_guard,
                     None,
                     &pending.upstream_local_tag,
                     pending.upstream_remote_tag.as_ref(),
@@ -3623,8 +3589,7 @@ impl RsipstackBackend {
 
                 let downstream_listener = {
                     let guard = context.sockets.downstream.lock().await;
-                    guard
-                        .clone()
+                    (*guard)
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
                 let default_user = context.config.downstream.default_user.as_deref();
@@ -3695,8 +3660,7 @@ impl RsipstackBackend {
 
                 let downstream_listener = {
                     let guard = context.sockets.downstream.lock().await;
-                    guard
-                        .clone()
+                    (*guard)
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
                 let default_user = context.config.downstream.default_user.as_deref();
@@ -3762,8 +3726,7 @@ impl RsipstackBackend {
 
                 let upstream_listener = {
                     let guard = context.sockets.upstream.lock().await;
-                    guard
-                        .clone()
+                    (*guard)
                         .unwrap_or_else(|| context.config.upstream.bind.socket_addr())
                 };
 
@@ -3779,7 +3742,7 @@ impl RsipstackBackend {
 
                 let target_contact = upstream_contact
                     .as_ref()
-                    .or_else(|| Some(&pending.upstream_request_uri));
+                    .or(Some(&pending.upstream_request_uri));
 
                 let upstream_request = Self::prepare_upstream_request(
                     endpoint.as_ref(),
@@ -3790,7 +3753,7 @@ impl RsipstackBackend {
                     pending.identity.as_str(),
                     pending.identity_isub.as_deref(),
                     &route_set,
-                    &*allowed_guard,
+                    &allowed_guard,
                     None,
                     &pending.upstream_local_tag,
                     pending.upstream_remote_tag.as_ref(),
@@ -3952,8 +3915,7 @@ impl RsipstackBackend {
 
                 let upstream_listener = {
                     let guard = context.sockets.upstream.lock().await;
-                    guard
-                        .clone()
+                    (*guard)
                         .unwrap_or_else(|| context.config.upstream.bind.socket_addr())
                 };
 
@@ -3975,7 +3937,7 @@ impl RsipstackBackend {
                     call.identity.as_str(),
                     call.identity_isub.as_deref(),
                     &route_set,
-                    &*allowed_guard,
+                    &allowed_guard,
                     None,
                     &call.upstream_local_tag,
                     call.upstream_remote_tag.as_ref(),
@@ -4086,8 +4048,7 @@ impl RsipstackBackend {
 
                 let downstream_listener = {
                     let guard = context.sockets.downstream.lock().await;
-                    guard
-                        .clone()
+                    (*guard)
                         .unwrap_or_else(|| context.config.downstream.bind.socket_addr())
                 };
                 let default_user = context.config.downstream.default_user.as_deref();
@@ -4166,8 +4127,8 @@ impl RsipstackBackend {
                     Self::expand_compact_headers(&mut response.headers);
                     let status = response.status_code.clone();
 
-                    if !response.body.is_empty() {
-                        if let Ok(body) = String::from_utf8(response.body.clone()) {
+                    if !response.body.is_empty()
+                        && let Ok(body) = String::from_utf8(response.body.clone()) {
                             let rewrite = call.media.rewrite_for_upstream(&body)?;
                             call.media
                                 .set_downstream_endpoints(
@@ -4181,7 +4142,6 @@ impl RsipstackBackend {
                                 rsip::headers::ContentLength::from(len),
                             ));
                         }
-                    }
 
                     if let Some(contact) = response
                         .contact_header()
@@ -4195,14 +4155,13 @@ impl RsipstackBackend {
                         continue;
                     }
 
-                    if matches!(status.kind(), StatusCodeKind::Successful) {
-                        if let Some(contact) = &new_downstream_contact {
+                    if matches!(status.kind(), StatusCodeKind::Successful)
+                        && let Some(contact) = &new_downstream_contact {
                             call.downstream_contact = Some(contact.clone());
                             if let Ok(target) = Self::sip_addr_from_uri(contact) {
                                 call.downstream_target = target;
                             }
                         }
-                    }
 
                     responded = true;
                     break;
@@ -4399,13 +4358,11 @@ fn resolve_remote_from_via(via: &rsip::headers::Via) -> Result<SocketAddr, Strin
     }
 
     for param in &via.params {
-        if let Param::Other(name, Some(value)) = param {
-            if name.value().eq_ignore_ascii_case("rport") {
-                if let Ok(parsed) = value.value().parse::<u16>() {
+        if let Param::Other(name, Some(value)) = param
+            && name.value().eq_ignore_ascii_case("rport")
+                && let Ok(parsed) = value.value().parse::<u16>() {
                     port = parsed;
                 }
-            }
-        }
     }
 
     let ip = match host {
@@ -4442,17 +4399,16 @@ async fn create_udp_listener(
     .map_err(Error::Transport)?;
     socket.set_reuse_address(true).map_err(Error::Transport)?;
 
-    if let Some(interface) = &bind.interface {
-        if let Err(err) = bind_to_device(&socket, interface) {
+    if let Some(interface) = &bind.interface
+        && let Err(err) = bind_to_device(&socket, interface) {
             return Err(match err {
                 Error::Transport(io_err) => Error::Transport(io_err),
                 Error::Media(msg) => {
-                    Error::Transport(std::io::Error::new(std::io::ErrorKind::Other, msg))
+                    Error::Transport(std::io::Error::other(msg))
                 }
                 other => other,
             });
         }
-    }
 
     socket
         .bind(&bind.socket_addr().into())
