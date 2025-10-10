@@ -628,12 +628,20 @@ impl RsipstackBackend {
         let mut request_uri = target_contact
             .cloned()
             .unwrap_or_else(|| request.uri.clone());
-        if let Some(dialog_uri) = dialog_uri {
-            request_uri.auth = dialog_uri.auth.clone();
-            request_uri.params = dialog_uri.params.clone();
-        }
-        if target_contact.is_none() {
+        let using_contact = target_contact.is_some();
+        if !using_contact {
+            if let Some(dialog_uri) = dialog_uri {
+                request_uri.auth = dialog_uri.auth.clone();
+                request_uri.params = dialog_uri.params.clone();
+            }
             request_uri.host_with_port = host_with_port.clone();
+        } else if let Some(dialog_uri) = dialog_uri {
+            if request_uri.auth.is_none() {
+                request_uri.auth = dialog_uri.auth.clone();
+            }
+            if request_uri.params.is_empty() {
+                request_uri.params = dialog_uri.params.clone();
+            }
         }
         if let Some(rewrite) = invite_isub {
             Self::rewrite_uri_with_isub(&mut request_uri, rewrite);
