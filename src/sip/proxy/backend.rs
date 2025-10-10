@@ -524,11 +524,6 @@ impl RsipstackBackend {
             rsip::headers::ContentLength::from(content_length),
         ));
 
-        let original_from = original
-            .from_header()
-            .ok()
-            .and_then(|header| header.typed().ok());
-
         request
             .headers
             .retain(|header| !matches!(header, rsip::Header::Via(_)));
@@ -582,15 +577,20 @@ impl RsipstackBackend {
         strip_rport_param(&mut via);
         request.headers.unique_push(rsip::Header::Via(via.into()));
 
-        let identity_uri_string = format!("sip:{}@{}", identity, upstream_config.sip_domain);
-        let identity_uri = Uri::try_from(identity_uri_string.as_str()).map_err(Error::sip_stack)?;
-
-        let mut typed_from = original_from.unwrap_or_else(|| typed::From {
-            display_name: None,
-            uri: identity_uri.clone(),
-            params: Vec::new(),
-        });
-        typed_from.uri = identity_uri.clone();
+        let typed_from_source = original
+            .to_header()
+            .ok()
+            .and_then(|header| header.typed().ok())
+            .unwrap_or_else(|| typed::To {
+                display_name: None,
+                uri: request.uri.clone(),
+                params: Vec::new(),
+            });
+        let mut typed_from = typed::From {
+            display_name: typed_from_source.display_name.clone(),
+            uri: typed_from_source.uri.clone(),
+            params: typed_from_source.params.clone(),
+        };
         typed_from
             .params
             .retain(|param| !matches!(param, Param::Tag(_)));
