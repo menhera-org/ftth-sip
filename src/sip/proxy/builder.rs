@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -119,7 +120,7 @@ impl ProxyHandle {
             shutdown_tx: _,
             worker,
         } = self;
-        let handle = tokio::task::spawn_blocking(move || worker.join().unwrap());
+        let handle = tokio::task::spawn_blocking(move || Self::join_worker(worker));
         let result = handle.await;
         match result {
             Ok(result) => result,
@@ -133,11 +134,31 @@ impl ProxyHandle {
             worker,
         } = self;
         let _ = shutdown_tx.send(true);
-        let handle = tokio::task::spawn_blocking(move || worker.join().unwrap());
+        let handle = tokio::task::spawn_blocking(move || Self::join_worker(worker));
         let result = handle.await;
         match result {
             Ok(result) => result,
             Err(join_error) => Err(Error::Media(format!("proxy task panicked: {join_error}"))),
+        }
+    }
+
+    fn join_worker(worker: std::thread::JoinHandle<Result<()>>) -> Result<()> {
+        match worker.join() {
+            Ok(result) => result,
+            Err(panic) => Err(Error::Media(format!(
+                "proxy worker panicked: {}",
+                Self::panic_message(panic),
+            ))),
+        }
+    }
+
+    fn panic_message(panic: Box<dyn Any + Send + 'static>) -> String {
+        if let Ok(msg) = panic.downcast::<String>() {
+            *msg
+        } else if let Ok(msg) = panic.downcast::<&'static str>() {
+            (*msg).to_string()
+        } else {
+            "unknown panic payload".to_string()
         }
     }
 }
